@@ -1,6 +1,5 @@
-import type { ModelProvider } from "./provider.js";
-import type { ModelEvent, ModelRequest } from "./types.js";
-
+import type { ModelProvider } from "../provider.js";
+import type { ModelEvent, ModelRequest } from "../types.js";
 
 export class FakeModelProvider implements ModelProvider {
 
