@@ -7,6 +7,7 @@ export interface ModelMessage {
 
 export interface ModelRequest {
     messages: ModelMessage[];
+    signal?: AbortSignal;
 }
 
 export interface ModelEvent {

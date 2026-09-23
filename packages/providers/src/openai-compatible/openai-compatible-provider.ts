@@ -35,6 +35,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
                         messages: request.messages,
                         stream: true,
                     }),
+                    signal: request.signal,
                 });
 
                 if (!response.ok) {

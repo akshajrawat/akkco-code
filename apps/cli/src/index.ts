@@ -39,15 +39,29 @@ const main = async () => {
                 continue;
             }
 
+            const controller = new AbortController();
+            const onSigint = () => {
+                controller.abort();
+            };
+            readline.on("SIGINT", onSigint);
+            process.on("SIGINT", onSigint);
+
             try {
-                for await (const event of session.send(input)) {
+                for await (const event of session.send(input, controller.signal)) {
                     stdout.write(event.content);
                 }
                 stdout.write("\n\n");
             } catch (error) {
                 stdout.write("\n");
-                const message = error instanceof Error ? error.message : String(error);
-                console.error(`Error: ${message}\n`);
+                if (controller.signal.aborted) {
+                    console.log("Generation cancelled.\n");
+                } else {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.error(`Error: ${message}\n`);
+                }
+            } finally {
+                readline.off("SIGINT", onSigint);
+                process.off("SIGINT", onSigint);
             }
         }
     } finally {

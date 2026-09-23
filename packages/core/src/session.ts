@@ -3,6 +3,7 @@ import type { AkkcoRuntime } from "./runtime.js";
 
 export class Session {
     private readonly _messages: ModelMessage[];
+    private _isRunning = false;
 
     constructor(private readonly runtime: AkkcoRuntime, initialMessages: ModelMessage[] = []) {
         this._messages = initialMessages.map((message) => ({ ...message }));
@@ -12,26 +13,42 @@ export class Session {
         return this._messages.map((message) => ({ ...message }));
     }
 
-    send = (input: string) => {
-        this._messages.push({ role: "user", content: input });
+    get isRunning() {
+        return this._isRunning;
+    }
 
+    send = (input: string, signal?: AbortSignal) => {
         const runtime = this.runtime;
-        const messages = [...this._messages];
         const internalMessages = this._messages;
+        const self = this;
 
         return {
             async *[Symbol.asyncIterator]() {
-                let assistantText = "";
-                for await (const event of runtime.run({ messages })) {
-                    assistantText += event.content;
-                    yield event;
+                if (self._isRunning) {
+                    throw new Error("A generation is already in progress for this session");
                 }
-                internalMessages.push({ role: "assistant", content: assistantText });
+                self._isRunning = true;
+
+                try {
+                    internalMessages.push({ role: "user", content: input });
+                    const messages = internalMessages.map((message) => ({ ...message }));
+                    let assistantText = "";
+                    for await (const event of runtime.run({ messages, signal })) {
+                        assistantText += event.content;
+                        yield event;
+                    }
+                    internalMessages.push({ role: "assistant", content: assistantText });
+                } finally {
+                    self._isRunning = false;
+                }
             },
         };
     };
 
     clear = () => {
+        if (this._isRunning) {
+            throw new Error("Cannot clear session while generation is in progress");
+        }
         this._messages.length = 0;
     };
 }
