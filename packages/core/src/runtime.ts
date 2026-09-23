@@ -6,4 +6,6 @@ export const createAkkcoRuntime = (provider: ModelProvider) => {
     };
 
     return { run };
-}
+};
+
+export type AkkcoRuntime = ReturnType<typeof createAkkcoRuntime>;

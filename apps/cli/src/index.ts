@@ -1,5 +1,4 @@
-import { createAkkcoRuntime } from "@akkco/core";
-import type { ModelRequest } from "@akkco/models";
+import { createAkkcoRuntime, Session } from "@akkco/core";
 import { OpenAICompatibleProvider } from "@akkco/providers";
 import process, { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -11,28 +10,49 @@ const main = async () => {
         apiKey: process.env.AKKCO_API_KEY,
     });
     const runtime = createAkkcoRuntime(provider);
+    const session = new Session(runtime);
 
     const readline = createInterface({ input: stdin, output: stdout });
 
-    console.log('\nAkkco Code\n');
+    console.log("Akkco Code\n");
 
-    const input = await readline.question('> ');
+    try {
+        while (true) {
+            const input = await readline.question("> ").catch(() => null);
+            if (input === null) {
+                break;
+            }
 
-    const request: ModelRequest = {
-        messages: [
-            {
-                role: "user",
-                content: input,
-            },
-        ],
-    };
+            const trimmed = input.trim();
+            if (trimmed === "") {
+                continue;
+            }
 
-    for await (const event of runtime.run(request)) {
-        stdout.write(event.content);
+            if (trimmed === "/exit") {
+                console.log("Goodbye.");
+                break;
+            }
+
+            if (trimmed === "/clear") {
+                session.clear();
+                console.log("Conversation cleared.\n");
+                continue;
+            }
+
+            try {
+                for await (const event of session.send(input)) {
+                    stdout.write(event.content);
+                }
+                stdout.write("\n\n");
+            } catch (error) {
+                stdout.write("\n");
+                const message = error instanceof Error ? error.message : String(error);
+                console.error(`Error: ${message}\n`);
+            }
+        }
+    } finally {
+        readline.close();
     }
-
-    stdout.write('\n');
-    readline.close();
 };
 
 main();
