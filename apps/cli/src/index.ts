@@ -1,5 +1,6 @@
 import { createAkkcoRuntime, Session } from "@akkco/core";
 import { OpenAICompatibleProvider } from "@akkco/providers";
+import { createRepositoryTools, createToolRegistry } from "@akkco/tools";
 import process, { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 
@@ -11,6 +12,7 @@ const main = async () => {
     });
     const runtime = createAkkcoRuntime(provider);
     const session = new Session(runtime);
+    const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
 
     const readline = createInterface({ input: stdin, output: stdout });
 
@@ -36,6 +38,49 @@ const main = async () => {
             if (trimmed === "/clear") {
                 session.clear();
                 console.log("Conversation cleared.\n");
+                continue;
+            }
+
+            if (trimmed === "/tools") {
+                const tools = toolRegistry.list();
+                if (tools.length === 0) {
+                    console.log("No tools available.\n");
+                } else {
+                    console.log("Available tools:");
+                    for (const tool of tools) {
+                        console.log(`- ${tool.name}: ${tool.description}`);
+                    }
+                    console.log();
+                }
+                continue;
+            }
+
+            if (trimmed === "/tool" || trimmed.startsWith("/tool ")) {
+                const args = trimmed.slice(5).trim();
+                if (!args) {
+                    console.error("Usage: /tool <name> [json]\n");
+                    continue;
+                }
+
+                const firstSpace = args.indexOf(" ");
+                const toolName = firstSpace === -1 ? args : args.slice(0, firstSpace);
+                const rawJson = firstSpace === -1 ? "{}" : args.slice(firstSpace + 1).trim();
+
+                let toolInput: unknown;
+                try {
+                    toolInput = JSON.parse(rawJson === "" ? "{}" : rawJson);
+                } catch {
+                    console.error("Error: Invalid JSON input for tool.\n");
+                    continue;
+                }
+
+                try {
+                    const result = await toolRegistry.execute(toolName, toolInput);
+                    console.log(`${result.content}\n`);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.error(`Error: ${message}\n`);
+                }
                 continue;
             }
 

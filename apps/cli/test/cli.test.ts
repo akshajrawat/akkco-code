@@ -89,3 +89,57 @@ test("Ctrl+C (SIGINT) while idle at the prompt cleanly exits the CLI", async () 
     assert.ok(exitCode === 0 || exitCode === 130, `Unexpected exit code: ${exitCode}`);
     assert.match(output, /Akkco Code/);
 });
+
+test("CLI /tools and /tool commands execute tools and handle errors gracefully", async () => {
+    const cp = spawn(tsxBin, [cliEntry], {
+        cwd: path.resolve(__dirname, "../../.."),
+        env: { ...process.env, AKKCO_BASE_URL: "http://127.0.0.1:1/v1" },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let output = "";
+    cp.stdout.on("data", (d) => (output += d.toString()));
+    cp.stderr.on("data", (d) => (output += d.toString()));
+
+    try {
+        await new Promise((r) => setTimeout(r, 600));
+
+        // 1. Test /tools
+        cp.stdin.write("/tools\n");
+        await new Promise((r) => setTimeout(r, 300));
+
+        // 2. Test valid /tool execution
+        cp.stdin.write('/tool read_file {"path":"packages/tools/package.json"}\n');
+        await new Promise((r) => setTimeout(r, 300));
+
+        // 3. Test invalid JSON error handling
+        cp.stdin.write('/tool read_file {invalid-json\n');
+        await new Promise((r) => setTimeout(r, 300));
+
+        // 4. Test unknown tool error handling
+        cp.stdin.write('/tool unknown_tool {}\n');
+        await new Promise((r) => setTimeout(r, 300));
+
+        // 5. Clean exit
+        cp.stdin.write("/exit\n");
+
+        const exitCode = await new Promise<number | null>((resolve) => cp.on("exit", resolve));
+        assert.strictEqual(exitCode, 0);
+
+        // Verify /tools output
+        assert.match(output, /Available tools:/);
+        assert.match(output, /read_file: Read the full contents/);
+        assert.match(output, /list_files: List immediate files/);
+        assert.match(output, /search_text: Search recursively/);
+
+        // Verify valid tool execution output
+        assert.match(output, /"@akkco\/tools"/);
+
+        // Verify error messages
+        assert.match(output, /Error: Invalid JSON input for tool\./);
+        assert.match(output, /Error: Unknown tool: unknown_tool/);
+        assert.match(output, /Goodbye\./);
+    } finally {
+        cp.kill();
+    }
+});

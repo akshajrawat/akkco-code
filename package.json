@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "dev": "tsx apps/cli/src/index.ts",
-    "test": "tsx --test packages/core/test/*.test.ts packages/providers/test/*.test.ts apps/cli/test/*.test.ts"
+    "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/**/*.test.ts\""
   },
   "keywords": [],
   "author": "",

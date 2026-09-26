@@ -6,6 +6,7 @@
   "dependencies": {
     "@akkco/core": "0.0.1",
     "@akkco/models": "0.0.1",
-    "@akkco/providers": "0.0.1"
+    "@akkco/providers": "0.0.1",
+    "@akkco/tools": "0.0.1"
   }
 }
