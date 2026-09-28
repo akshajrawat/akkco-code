@@ -1,6 +1,6 @@
-import { createAkkcoRuntime, Session } from "@akkco/core";
+import { createAkkcoRuntime, Session, type RuntimeToolHost } from "@akkco/core";
 import { OpenAICompatibleProvider } from "@akkco/providers";
-import { createRepositoryTools, createToolRegistry } from "@akkco/tools";
+import { createRepositoryTools, createToolRegistry, toModelTools } from "@akkco/tools";
 import process, { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 
@@ -10,9 +10,17 @@ const main = async () => {
         model: process.env.AKKCO_MODEL ?? "qwen2.5-coder:3b",
         apiKey: process.env.AKKCO_API_KEY,
     });
-    const runtime = createAkkcoRuntime(provider);
-    const session = new Session(runtime);
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
+    const toolHost: RuntimeToolHost = {
+        get tools() {
+            return toModelTools(toolRegistry.list());
+        },
+        execute: async (name: string, input: unknown) => {
+            return toolRegistry.execute(name, input);
+        },
+    };
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const session = new Session(runtime);
 
     const readline = createInterface({ input: stdin, output: stdout });
 
@@ -93,7 +101,9 @@ const main = async () => {
 
             try {
                 for await (const event of session.send(input, controller.signal)) {
-                    stdout.write(event.content);
+                    if (event.type === "text") {
+                        stdout.write(event.content);
+                    }
                 }
                 stdout.write("\n\n");
             } catch (error) {

@@ -1,12 +1,16 @@
-import type { ModelProvider } from "../provider.js";
-import type { ModelEvent, ModelRequest } from "../types.js";
+import type { ModelEvent } from "../contracts/events.js";
+import type { ModelMessage } from "../contracts/items.js";
+import type { ModelProvider } from "../contracts/provider.js";
+import type { ModelRequest } from "../contracts/request.js";
 
 export class FakeModelProvider implements ModelProvider {
-
-    readonly id = 'fake';
+    readonly id = "fake";
 
     stream = (request: ModelRequest) => {
-        const text = `Fake response to ${request.messages.at(-1)?.content ?? ""}`
+        const lastMessage = request.items
+            .filter((item): item is ModelMessage => item.type === "message")
+            .at(-1);
+        const text = `Fake response to ${lastMessage?.content ?? ""}`;
 
         const chunks = text.split(" ");
 
@@ -18,7 +22,7 @@ export class FakeModelProvider implements ModelProvider {
                         content: `${chunk} `,
                     } satisfies ModelEvent;
                 }
-            }
-        }
-    }
+            },
+        };
+    };
 }

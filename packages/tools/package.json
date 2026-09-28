@@ -10,6 +10,8 @@
     }
   },
   "dependencies": {
-    "zod": "^3.24.2"
+    "@akkco/models": "0.0.1",
+    "zod": "^3.24.2",
+    "zod-to-json-schema": "^3.25.2"
   }
 }

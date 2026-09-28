@@ -1,16 +1,22 @@
-import type { ModelMessage } from "@akkco/models";
-import type { AkkcoRuntime } from "./runtime.js";
+import { compileContext } from "./context/context-compiler.js";
+import type { RuntimeEvent } from "./runtime/events.js";
+import type { AkkcoRuntime } from "./runtime/runtime.js";
+import type { TranscriptItem } from "./transcript/types.js";
+
+const isAbortError = (error: unknown, signal?: AbortSignal) =>
+    Boolean(signal?.aborted) ||
+    (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message)));
 
 export class Session {
-    private readonly _messages: ModelMessage[];
+    private readonly _transcript: TranscriptItem[];
     private _isRunning = false;
 
-    constructor(private readonly runtime: AkkcoRuntime, initialMessages: ModelMessage[] = []) {
-        this._messages = initialMessages.map((message) => ({ ...message }));
+    constructor(private readonly runtime: AkkcoRuntime, initialTranscript: TranscriptItem[] = []) {
+        this._transcript = initialTranscript.map((item) => ({ ...item }));
     }
 
-    get messages() {
-        return this._messages.map((message) => ({ ...message }));
+    get transcript() {
+        return this._transcript.map((item) => ({ ...item }));
     }
 
     get isRunning() {
@@ -19,27 +25,87 @@ export class Session {
 
     send = (input: string, signal?: AbortSignal) => {
         const runtime = this.runtime;
-        const internalMessages = this._messages;
+        const internalTranscript = this._transcript;
         const self = this;
 
         return {
-            async *[Symbol.asyncIterator]() {
+            async *[Symbol.asyncIterator](): AsyncGenerator<RuntimeEvent, void, unknown> {
                 if (self._isRunning) {
                     throw new Error("A generation is already in progress for this session");
                 }
                 self._isRunning = true;
 
+                let assistantText = "";
+                let completed = false;
+                let errorOccurred = false;
+
                 try {
-                    internalMessages.push({ role: "user", content: input });
-                    const messages = internalMessages.map((message) => ({ ...message }));
-                    let assistantText = "";
-                    for await (const event of runtime.run({ messages, signal })) {
-                        assistantText += event.content;
-                        yield event;
+                    internalTranscript.push({ type: "user", content: input });
+                    const items = compileContext(internalTranscript);
+
+                    for await (const event of runtime.run({ items, signal })) {
+                        if (event.type === "text") {
+                            assistantText += event.content;
+                            yield event;
+                        } else if (event.type === "tool_execution") {
+                            if (assistantText.length > 0) {
+                                internalTranscript.push({
+                                    type: "assistant",
+                                    content: assistantText,
+                                    status: "completed",
+                                });
+                                assistantText = "";
+                            }
+
+                            internalTranscript.push({
+                                type: "tool_execution",
+                                callId: event.callId,
+                                toolName: event.toolName,
+                                arguments: event.arguments,
+                                result: event.result,
+                                error: event.error,
+                                status: event.status,
+                                durationMs: event.durationMs,
+                            });
+
+                            yield event;
+                        }
                     }
-                    internalMessages.push({ role: "assistant", content: assistantText });
+
+                    completed = true;
+                    internalTranscript.push({
+                        type: "assistant",
+                        content: assistantText,
+                        status: "completed",
+                    });
+                } catch (error) {
+                    errorOccurred = true;
+                    if (isAbortError(error, signal)) {
+                        internalTranscript.push({
+                            type: "assistant",
+                            content: assistantText,
+                            status: "interrupted",
+                        });
+                    } else {
+                        internalTranscript.push({
+                            type: "assistant",
+                            content: assistantText,
+                            status: "failed",
+                        });
+                    }
+                    throw error;
                 } finally {
-                    self._isRunning = false;
+                    try {
+                        if (!completed && !errorOccurred) {
+                            internalTranscript.push({
+                                type: "assistant",
+                                content: assistantText,
+                                status: "interrupted",
+                            });
+                        }
+                    } finally {
+                        self._isRunning = false;
+                    }
                 }
             },
         };
@@ -49,9 +115,9 @@ export class Session {
         if (this._isRunning) {
             throw new Error("Cannot clear session while generation is in progress");
         }
-        this._messages.length = 0;
+        this._transcript.length = 0;
     };
 }
 
-export const createAkkcoSession = (runtime: AkkcoRuntime, initialMessages: ModelMessage[] = []) =>
-    new Session(runtime, initialMessages);
+export const createAkkcoSession = (runtime: AkkcoRuntime, initialTranscript: TranscriptItem[] = []) =>
+    new Session(runtime, initialTranscript);

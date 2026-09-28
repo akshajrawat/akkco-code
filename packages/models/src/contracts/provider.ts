@@ -1,4 +1,5 @@
-import { ModelEvent, ModelRequest } from "./types.js";
+import type { ModelEvent } from "./events.js";
+import type { ModelRequest } from "./request.js";
 
 export interface ModelProvider {
     readonly id: string;
