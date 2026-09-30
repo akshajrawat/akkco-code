@@ -20,13 +20,9 @@ test("compileContext: system item compilation", () => {
 });
 
 test("compileContext: user item compilation", () => {
-    const transcript: UserTranscriptItem[] = [
-        { type: "user", content: "Write a function" },
-    ];
+    const transcript: UserTranscriptItem[] = [{ type: "user", content: "Write a function" }];
     const items = compileContext(transcript);
-    assert.deepStrictEqual(items, [
-        { type: "message", role: "user", content: "Write a function" },
-    ]);
+    assert.deepStrictEqual(items, [{ type: "message", role: "user", content: "Write a function" }]);
 });
 
 test("compileContext: completed assistant item compilation", () => {

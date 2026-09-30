@@ -40,7 +40,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
                 if (!response.ok) {
                     const errorText = await response.text().catch(() => "");
-                    throw new Error(`OpenAI request failed with status ${response.status}: ${errorText}`);
+                    throw new Error(
+                        `OpenAI request failed with status ${response.status}: ${errorText}`,
+                    );
                 }
 
                 if (!response.body) {

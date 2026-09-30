@@ -9,7 +9,7 @@ interface InProgressToolCall {
 
 export const parseOpenAIEventStream = async function* (
     body: AsyncIterable<Uint8Array>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
 ): AsyncGenerator<ModelEvent, void, unknown> {
     const decoder = new TextDecoder();
     let buffer = "";
@@ -33,7 +33,7 @@ export const parseOpenAIEventStream = async function* (
                 parsedArgs = rawArgs === "" ? {} : JSON.parse(rawArgs);
             } catch (error: any) {
                 throw new Error(
-                    `Failed to parse tool call arguments for "${call.name || call.id}": ${error?.message ?? "Invalid JSON"}`
+                    `Failed to parse tool call arguments for "${call.name || call.id}": ${error?.message ?? "Invalid JSON"}`,
                 );
             }
 

@@ -8,7 +8,9 @@ const listFilesInputSchema = z.object({
     path: z.string().optional(),
 });
 
-export const createListFilesTool = (repositoryRoot: string): ToolDefinition<typeof listFilesInputSchema> => ({
+export const createListFilesTool = (
+    repositoryRoot: string,
+): ToolDefinition<typeof listFilesInputSchema> => ({
     name: "list_files",
     description: "List immediate files and directories in a repository directory.",
     inputSchema: listFilesInputSchema,

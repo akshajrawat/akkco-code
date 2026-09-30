@@ -21,5 +21,4 @@ export const toModelTool = (tool: AnyToolDefinition): ModelTool => ({
     inputSchema: normalizeInputSchema(tool.inputSchema),
 });
 
-export const toModelTools = (tools: AnyToolDefinition[]): ModelTool[] =>
-    tools.map(toModelTool);
+export const toModelTools = (tools: AnyToolDefinition[]): ModelTool[] => tools.map(toModelTool);

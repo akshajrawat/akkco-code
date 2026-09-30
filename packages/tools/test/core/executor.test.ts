@@ -39,9 +39,12 @@ test("Invalid input is rejected by Zod and throws ZodError", async () => {
         execute: async () => ({ content: "ok" }),
     };
 
-    await assert.rejects(async () => {
-        await executeTool(tool, { count: "not-a-number" });
-    }, (err: any) => err instanceof ZodError);
+    await assert.rejects(
+        async () => {
+            await executeTool(tool, { count: "not-a-number" });
+        },
+        (err: any) => err instanceof ZodError,
+    );
 });
 
 test("execute() is not called when validation fails", async () => {
@@ -60,9 +63,12 @@ test("execute() is not called when validation fails", async () => {
         },
     };
 
-    await assert.rejects(async () => {
-        await executeTool(tool, { id: "123" }); // shorter than 5 chars
-    }, (err: any) => err instanceof ZodError);
+    await assert.rejects(
+        async () => {
+            await executeTool(tool, { id: "123" }); // shorter than 5 chars
+        },
+        (err: any) => err instanceof ZodError,
+    );
 
     assert.strictEqual(executeCalled, false);
 });

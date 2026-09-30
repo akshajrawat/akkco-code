@@ -1,1 +1,4 @@
-export { OpenAICompatibleProvider, type OpenAICompatibleConfig } from "./openai-compatible/openai-compatible-provider.js";
+export {
+    OpenAICompatibleProvider,
+    type OpenAICompatibleConfig,
+} from "./openai-compatible/openai-compatible-provider.js";

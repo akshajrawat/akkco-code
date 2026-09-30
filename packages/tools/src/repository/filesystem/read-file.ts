@@ -7,7 +7,9 @@ const readFileInputSchema = z.object({
     path: z.string().min(1, "Path cannot be empty"),
 });
 
-export const createReadFileTool = (repositoryRoot: string): ToolDefinition<typeof readFileInputSchema> => ({
+export const createReadFileTool = (
+    repositoryRoot: string,
+): ToolDefinition<typeof readFileInputSchema> => ({
     name: "read_file",
     description: "Read the full contents of a file from the repository as UTF-8 text.",
     inputSchema: readFileInputSchema,

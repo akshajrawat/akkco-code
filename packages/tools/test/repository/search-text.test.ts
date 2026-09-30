@@ -30,7 +30,7 @@ test("search_text finds literal text with correct relative path and line numbers
         await fs.writeFile(
             path.join(srcDir, "app.ts"),
             "line 1\nline 2: target_pattern\nline 3\nline 4: target_pattern again\n",
-            "utf-8"
+            "utf-8",
         );
 
         const tool = createSearchTextTool(repoRoot);
@@ -60,9 +60,7 @@ test("search_text respects optional search path", async () => {
         const tool = createSearchTextTool(repoRoot);
         const result = await tool.execute({ query: "find_me", path: "packages/a" });
 
-        assert.deepStrictEqual(result.content.split("\n"), [
-            "packages/a/file.ts:1:find_me here",
-        ]);
+        assert.deepStrictEqual(result.content.split("\n"), ["packages/a/file.ts:1:find_me here"]);
     } finally {
         await cleanup();
     }

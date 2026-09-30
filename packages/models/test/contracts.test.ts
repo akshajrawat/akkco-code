@@ -1,8 +1,6 @@
 import assert from "node:assert";
 import test from "node:test";
-import {
-    FakeModelProvider,
-} from "../src/testing/index.js";
+import { FakeModelProvider } from "../src/testing/index.js";
 import type {
     ModelEvent,
     ModelItem,
@@ -67,9 +65,7 @@ test("ModelEvent discriminated union handles text and tool_call", () => {
 test("FakeModelProvider streams responses based on ModelRequest items", async () => {
     const provider = new FakeModelProvider();
     const request: ModelRequest = {
-        items: [
-            { type: "message", role: "user", content: "ping" },
-        ],
+        items: [{ type: "message", role: "user", content: "ping" }],
     };
 
     const chunks: string[] = [];

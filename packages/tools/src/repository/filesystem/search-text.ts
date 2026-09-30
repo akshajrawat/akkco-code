@@ -13,7 +13,7 @@ const SKIPPED_DIRS = new Set(["node_modules", ".git", "dist", "build"]);
 
 export const createSearchTextTool = (
     repositoryRoot: string,
-    maxMatches = 100
+    maxMatches = 100,
 ): ToolDefinition<typeof searchTextInputSchema> => ({
     name: "search_text",
     description: "Search recursively for literal text within files in the repository.",

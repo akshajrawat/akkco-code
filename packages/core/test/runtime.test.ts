@@ -1,12 +1,7 @@
 import assert from "node:assert";
 import test from "node:test";
 import { createAkkcoRuntime, type RuntimeEvent, type RuntimeToolHost } from "../src/index.js";
-import type {
-    ModelEvent,
-    ModelProvider,
-    ModelRequest,
-    ModelTool,
-} from "@akkco/models";
+import type { ModelEvent, ModelProvider, ModelRequest, ModelTool } from "@akkco/models";
 
 test("1. text-only provider response", async () => {
     let callCount = 0;
@@ -70,7 +65,9 @@ test("2. runtime advertises ModelTool[] to provider", async () => {
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "test" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "test" }],
+    })) {
         events.push(event);
     }
 
@@ -116,7 +113,9 @@ test("3. model emits one tool call → runtime executes → model called again",
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "2+3" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "2+3" }],
+    })) {
         events.push(event);
     }
 
@@ -166,12 +165,19 @@ test("4. tool result is present in second ModelRequest", async () => {
     };
 
     const runtime = createAkkcoRuntime(provider, toolHost);
-    for await (const _event of runtime.run({ items: [{ type: "message", role: "user", content: "who is u123" }] })) {}
+    for await (const _event of runtime.run({
+        items: [{ type: "message", role: "user", content: "who is u123" }],
+    })) {
+    }
 
     assert.strictEqual(capturedRequests.length, 2);
     const secondReq = capturedRequests[1];
     assert.strictEqual(secondReq.items.length, 3);
-    assert.deepStrictEqual(secondReq.items[0], { type: "message", role: "user", content: "who is u123" });
+    assert.deepStrictEqual(secondReq.items[0], {
+        type: "message",
+        role: "user",
+        content: "who is u123",
+    });
     assert.deepStrictEqual(secondReq.items[1], {
         type: "tool_call",
         id: "call_abc",
@@ -219,7 +225,9 @@ test("5. final assistant text streams after tool result", async () => {
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "go" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "go" }],
+    })) {
         events.push(event);
     }
 
@@ -263,7 +271,9 @@ test("6. text before tool call is preserved", async () => {
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "status?" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "status?" }],
+    })) {
         events.push(event);
     }
 
@@ -337,7 +347,9 @@ test("7. multiple tool calls in one model turn execute sequentially", async () =
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "run both" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "run both" }],
+    })) {
         events.push(event);
     }
 
@@ -390,7 +402,9 @@ test("8. tool execution failure becomes isError tool result and model gets anoth
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "read" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "read" }],
+    })) {
         events.push(event);
     }
 
@@ -432,7 +446,10 @@ test("9. unknown/hallucinated tool becomes recoverable failed tool result", asyn
             }
             return {
                 async *[Symbol.asyncIterator]() {
-                    yield { type: "text", content: "Apologies, tool not found." } satisfies ModelEvent;
+                    yield {
+                        type: "text",
+                        content: "Apologies, tool not found.",
+                    } satisfies ModelEvent;
                 },
             };
         },
@@ -447,7 +464,9 @@ test("9. unknown/hallucinated tool becomes recoverable failed tool result", asyn
 
     const runtime = createAkkcoRuntime(provider, toolHost);
     const events: RuntimeEvent[] = [];
-    for await (const event of runtime.run({ items: [{ type: "message", role: "user", content: "hallucinate" }] })) {
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "hallucinate" }],
+    })) {
         events.push(event);
     }
 
@@ -504,12 +523,16 @@ test("10. cancellation stops additional tools/provider turns", async () => {
 
     const runtime = createAkkcoRuntime(provider, toolHost);
 
-    await assert.rejects(async () => {
-        for await (const _event of runtime.run({
-            items: [{ type: "message", role: "user", content: "test" }],
-            signal: controller.signal,
-        })) {}
-    }, (err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+    await assert.rejects(
+        async () => {
+            for await (const _event of runtime.run({
+                items: [{ type: "message", role: "user", content: "test" }],
+                signal: controller.signal,
+            })) {
+            }
+        },
+        (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
 
     assert.strictEqual(secondToolExecuted, false);
     assert.strictEqual(turn2Called, false);
@@ -541,14 +564,12 @@ test("11. maxToolIterations prevents infinite loops", async () => {
 
     const runtime = createAkkcoRuntime(provider, toolHost, 3);
 
-    await assert.rejects(
-        async () => {
-            for await (const _event of runtime.run({
-                items: [{ type: "message", role: "user", content: "loop" }],
-            })) {}
-        },
-        /Maximum tool iterations exceeded/
-    );
+    await assert.rejects(async () => {
+        for await (const _event of runtime.run({
+            items: [{ type: "message", role: "user", content: "loop" }],
+        })) {
+        }
+    }, /Maximum tool iterations exceeded/);
 
     // Iterations allowed were 3, on 4th iteration it exceeds limit
     assert.strictEqual(turns, 4);

@@ -40,7 +40,8 @@ export const compileContext = (transcript: TranscriptItem[]): ModelItem[] => {
                     items.push({
                         type: "message",
                         role: "system",
-                        content: "[Previous assistant generation was interrupted before completion]",
+                        content:
+                            "[Previous assistant generation was interrupted before completion]",
                     });
                 } else if (item.status === "failed") {
                     if (item.content.length > 0) {

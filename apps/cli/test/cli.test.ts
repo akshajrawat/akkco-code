@@ -16,10 +16,14 @@ test("Ctrl+C (SIGINT) cancels active generation without killing the CLI, allowin
         res.writeHead(200, { "Content-Type": "text/event-stream" });
         if (turnCount === 1) {
             // First turn: slow generation that will be aborted
-            res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "slow response" } }] })}\n\n`);
+            res.write(
+                `data: ${JSON.stringify({ choices: [{ delta: { content: "slow response" } }] })}\n\n`,
+            );
         } else {
             // Second turn: fast generation that completes
-            res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "completed second response" } }] })}\n\n`);
+            res.write(
+                `data: ${JSON.stringify({ choices: [{ delta: { content: "completed second response" } }] })}\n\n`,
+            );
             res.write("data: [DONE]\n\n");
             res.end();
         }
@@ -113,11 +117,11 @@ test("CLI /tools and /tool commands execute tools and handle errors gracefully",
         await new Promise((r) => setTimeout(r, 300));
 
         // 3. Test invalid JSON error handling
-        cp.stdin.write('/tool read_file {invalid-json\n');
+        cp.stdin.write("/tool read_file {invalid-json\n");
         await new Promise((r) => setTimeout(r, 300));
 
         // 4. Test unknown tool error handling
-        cp.stdin.write('/tool unknown_tool {}\n');
+        cp.stdin.write("/tool unknown_tool {}\n");
         await new Promise((r) => setTimeout(r, 300));
 
         // 5. Clean exit

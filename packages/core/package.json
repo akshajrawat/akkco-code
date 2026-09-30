@@ -1,15 +1,15 @@
 {
-  "name": "@akkco/core",
-  "version": "0.0.1",
-  "private": true,
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+    "name": "@akkco/core",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./src/index.ts",
+            "default": "./src/index.ts"
+        }
+    },
+    "dependencies": {
+        "@akkco/models": "0.0.1"
     }
-  },
-  "dependencies": {
-    "@akkco/models": "0.0.1"
-  }
 }

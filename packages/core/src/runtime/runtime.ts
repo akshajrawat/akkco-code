@@ -24,7 +24,7 @@ const throwIfAborted = (signal?: AbortSignal) => {
 export const createAkkcoRuntime = (
     provider: ModelProvider,
     toolHost?: RuntimeToolHost,
-    maxToolIterations = 8
+    maxToolIterations = 8,
 ) => {
     const run = (request: ModelRequest) => {
         return {
@@ -131,7 +131,8 @@ export const createAkkcoRuntime = (
                             throwIfAborted(request.signal);
 
                             const durationMs = Date.now() - startTime;
-                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            const errorMessage =
+                                error instanceof Error ? error.message : String(error);
 
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",

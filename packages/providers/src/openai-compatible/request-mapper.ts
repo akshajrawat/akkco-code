@@ -95,7 +95,7 @@ export const mapModelToolsToOpenAITools = (tools: ModelTool[]): OpenAITool[] =>
 
 export const mapModelRequestToOpenAIPayload = (
     request: ModelRequest,
-    model: string
+    model: string,
 ): OpenAIRequestBody => {
     const payload: OpenAIRequestBody = {
         model,

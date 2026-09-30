@@ -19,7 +19,7 @@ test("read_file converts to correct ModelTool description", () => {
     assert.strictEqual(modelTool.name, "read_file");
     assert.strictEqual(
         modelTool.description,
-        "Read the full contents of a file from the repository as UTF-8 text."
+        "Read the full contents of a file from the repository as UTF-8 text.",
     );
     assert.strictEqual(modelTool.inputSchema.type, "object");
 
@@ -39,7 +39,7 @@ test("list_files reflects optional path correctly", () => {
     assert.strictEqual(modelTool.name, "list_files");
     assert.strictEqual(
         modelTool.description,
-        "List immediate files and directories in a repository directory."
+        "List immediate files and directories in a repository directory.",
     );
     assert.strictEqual(modelTool.inputSchema.type, "object");
 
@@ -60,7 +60,7 @@ test("search_text reflects required query and optional path", () => {
     assert.strictEqual(modelTool.name, "search_text");
     assert.strictEqual(
         modelTool.description,
-        "Search recursively for literal text within files in the repository."
+        "Search recursively for literal text within files in the repository.",
     );
     assert.strictEqual(modelTool.inputSchema.type, "object");
 
@@ -93,10 +93,7 @@ test("execute is never present in ModelTool output", () => {
         const modelTool = toModelTool(tool);
 
         assert.strictEqual("execute" in modelTool, false);
-        assert.strictEqual(
-            Object.prototype.hasOwnProperty.call(modelTool, "execute"),
-            false
-        );
+        assert.strictEqual(Object.prototype.hasOwnProperty.call(modelTool, "execute"), false);
         assert.deepStrictEqual(Object.keys(modelTool).sort(), [
             "description",
             "inputSchema",
@@ -139,7 +136,7 @@ test("multiple heterogeneous ToolDefinitions can convert to ModelTool[]", () => 
     assert.strictEqual(modelTools.length, allTools.length);
     assert.deepStrictEqual(
         modelTools.map((t) => t.name),
-        allTools.map((t) => t.name)
+        allTools.map((t) => t.name),
     );
 
     for (const modelTool of modelTools) {
@@ -183,7 +180,7 @@ test("ModelTool conversion does not change runtime ToolDefinition behavior", asy
     // Validation rejection still functions unchanged
     await assert.rejects(
         () => executeTool(runtimeTool, { message: "x" }),
-        (err: Error) => err.name === "ZodError"
+        (err: Error) => err.name === "ZodError",
     );
     assert.strictEqual(callCount, 2);
 

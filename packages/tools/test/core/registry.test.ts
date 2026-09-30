@@ -1,11 +1,7 @@
 import assert from "node:assert";
 import test from "node:test";
 import { z, ZodError } from "zod";
-import {
-    createRepositoryTools,
-    createToolRegistry,
-    ToolRegistry,
-} from "../../src/index.js";
+import { createRepositoryTools, createToolRegistry, ToolRegistry } from "../../src/index.js";
 import type { ToolDefinition } from "../../src/index.js";
 
 test("Tool registration and retrieval", () => {
@@ -42,7 +38,10 @@ test("Listing registered tools", () => {
     const tools = registry.list();
 
     assert.strictEqual(tools.length, 2);
-    assert.deepStrictEqual(tools.map((t) => t.name), ["tool_1", "tool_2"]);
+    assert.deepStrictEqual(
+        tools.map((t) => t.name),
+        ["tool_1", "tool_2"],
+    );
 });
 
 test("Duplicate tool registration error", () => {
@@ -62,10 +61,7 @@ test("Duplicate tool registration error", () => {
     };
 
     registry.register(tool1);
-    assert.throws(
-        () => registry.register(tool2),
-        /Tool already registered: duplicate_tool/
-    );
+    assert.throws(() => registry.register(tool2), /Tool already registered: duplicate_tool/);
 });
 
 test("Unknown tool execution error", async () => {
@@ -73,7 +69,7 @@ test("Unknown tool execution error", async () => {
 
     await assert.rejects(
         async () => registry.execute("non_existent", {}),
-        /Unknown tool: non_existent/
+        /Unknown tool: non_existent/,
     );
 });
 
@@ -120,7 +116,7 @@ test("Invalid input failing schema validation before execute() runs", async () =
 
     await assert.rejects(
         async () => registry.execute("guarded", { wrongField: 123 }),
-        (err: unknown) => err instanceof ZodError
+        (err: unknown) => err instanceof ZodError,
     );
 
     assert.strictEqual(executeCalled, false);

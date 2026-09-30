@@ -11,7 +11,10 @@ export class Session {
     private readonly _transcript: TranscriptItem[];
     private _isRunning = false;
 
-    constructor(private readonly runtime: AkkcoRuntime, initialTranscript: TranscriptItem[] = []) {
+    constructor(
+        private readonly runtime: AkkcoRuntime,
+        initialTranscript: TranscriptItem[] = [],
+    ) {
         this._transcript = initialTranscript.map((item) => ({ ...item }));
     }
 
@@ -119,5 +122,7 @@ export class Session {
     };
 }
 
-export const createAkkcoSession = (runtime: AkkcoRuntime, initialTranscript: TranscriptItem[] = []) =>
-    new Session(runtime, initialTranscript);
+export const createAkkcoSession = (
+    runtime: AkkcoRuntime,
+    initialTranscript: TranscriptItem[] = [],
+) => new Session(runtime, initialTranscript);

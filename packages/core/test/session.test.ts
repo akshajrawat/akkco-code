@@ -98,14 +98,17 @@ test("cancellation records partial assistant content as interrupted", async () =
     const controller = new AbortController();
 
     const chunks: string[] = [];
-    await assert.rejects(async () => {
-        for await (const event of session.send("prompt", controller.signal)) {
-            if (event.type === "text") {
-                chunks.push(event.content);
+    await assert.rejects(
+        async () => {
+            for await (const event of session.send("prompt", controller.signal)) {
+                if (event.type === "text") {
+                    chunks.push(event.content);
+                }
+                controller.abort();
             }
-            controller.abort();
-        }
-    }, (err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+        },
+        (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
 
     assert.deepStrictEqual(chunks, ["chunk 1 "]);
     assert.strictEqual(session.transcript.length, 2);
@@ -134,12 +137,19 @@ test("cancellation before any text still records interrupted assistant item", as
     const controller = new AbortController();
     controller.abort();
 
-    await assert.rejects(async () => {
-        for await (const _ of session.send("cancelled immediately", controller.signal)) {}
-    }, (err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+    await assert.rejects(
+        async () => {
+            for await (const _ of session.send("cancelled immediately", controller.signal)) {
+            }
+        },
+        (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
 
     assert.strictEqual(session.transcript.length, 2);
-    assert.deepStrictEqual(session.transcript[0], { type: "user", content: "cancelled immediately" });
+    assert.deepStrictEqual(session.transcript[0], {
+        type: "user",
+        content: "cancelled immediately",
+    });
     assert.deepStrictEqual(session.transcript[1], {
         type: "assistant",
         content: "",
@@ -236,14 +246,18 @@ test("next generation after an interruption receives compiled interruption conte
     const session = new Session(runtime);
 
     const controller = new AbortController();
-    await assert.rejects(async () => {
-        for await (const _ of session.send("write code", controller.signal)) {
-            controller.abort();
-        }
-    }, (err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+    await assert.rejects(
+        async () => {
+            for await (const _ of session.send("write code", controller.signal)) {
+                controller.abort();
+            }
+        },
+        (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
 
     // Turn 2
-    for await (const _ of session.send("continue")) {}
+    for await (const _ of session.send("continue")) {
+    }
 
     assert.strictEqual(recordedRequests.length, 2);
     // Turn 1 request
@@ -286,11 +300,13 @@ test("next generation after failure receives compiled failure context", async ()
     const session = new Session(runtime);
 
     await assert.rejects(async () => {
-        for await (const _ of session.send("run step")) {}
+        for await (const _ of session.send("run step")) {
+        }
     }, /Temporary failure/);
 
     // Turn 2
-    for await (const _ of session.send("retry")) {}
+    for await (const _ of session.send("retry")) {
+    }
 
     assert.strictEqual(recordedRequests.length, 2);
     assert.deepStrictEqual(recordedRequests[1].items, [
@@ -313,7 +329,8 @@ test("external callers cannot mutate transcript", async () => {
     };
     const session = new Session(fakeRuntime);
 
-    for await (const _ of session.send("test")) {}
+    for await (const _ of session.send("test")) {
+    }
     assert.strictEqual(session.transcript.length, 2);
 
     const snapshot = session.transcript;
@@ -357,7 +374,8 @@ test("in-flight lock: only one generation actively running per Session", async (
 
     // Consuming stream2 while stream1 is in-flight must fail immediately
     await assert.rejects(async () => {
-        for await (const _ of stream2) {}
+        for await (const _ of stream2) {
+        }
     }, /A generation is already in progress for this session/);
 
     // Stream 2 attempt did not alter session transcript
@@ -390,7 +408,8 @@ test("lock releases after success/error/cancellation/early break", async () => {
         }),
     };
     const s1 = new Session(runtimeSuccess);
-    for await (const _ of s1.send("1")) {}
+    for await (const _ of s1.send("1")) {
+    }
     assert.strictEqual(s1.isRunning, false);
 
     // 2. Error
@@ -401,7 +420,8 @@ test("lock releases after success/error/cancellation/early break", async () => {
     };
     const s2 = new Session(runtimeError);
     await assert.rejects(async () => {
-        for await (const _ of s2.send("2")) {}
+        for await (const _ of s2.send("2")) {
+        }
     }, /Sync error/);
     assert.strictEqual(s2.isRunning, false);
 
@@ -417,7 +437,8 @@ test("lock releases after success/error/cancellation/early break", async () => {
     };
     const s3 = new Session(runtimeAbort);
     await assert.rejects(async () => {
-        for await (const _ of s3.send("3")) {}
+        for await (const _ of s3.send("3")) {
+        }
     });
     assert.strictEqual(s3.isRunning, false);
 
@@ -449,7 +470,8 @@ test("clear() semantics remain correct", async () => {
     const runtime = createAkkcoRuntime(provider);
     const session = new Session(runtime);
 
-    for await (const _ of session.send("msg")) {}
+    for await (const _ of session.send("msg")) {
+    }
     assert.strictEqual(session.transcript.length, 2);
 
     session.clear();
@@ -477,7 +499,8 @@ test("13. assistant text before a tool is committed before tool transcript", asy
     };
 
     const session = new Session(mockRuntime as any);
-    for await (const _ of session.send("check files")) {}
+    for await (const _ of session.send("check files")) {
+    }
 
     const transcript = session.transcript;
     assert.strictEqual(transcript.length, 4);
@@ -519,7 +542,8 @@ test("14. successful tool execution recorded chronologically", async () => {
     };
 
     const session = new Session(mockRuntime as any);
-    for await (const _ of session.send("read file")) {}
+    for await (const _ of session.send("read file")) {
+    }
 
     const transcript = session.transcript;
     assert.strictEqual(transcript.length, 3);
@@ -556,7 +580,8 @@ test("15. failed tool execution recorded chronologically", async () => {
     };
 
     const session = new Session(mockRuntime as any);
-    for await (const _ of session.send("read missing")) {}
+    for await (const _ of session.send("read missing")) {
+    }
 
     const transcript = session.transcript;
     assert.strictEqual(transcript.length, 3);
@@ -593,7 +618,8 @@ test("16. final assistant segment committed after tool interaction", async () =>
     };
 
     const session = new Session(mockRuntime as any);
-    for await (const _ of session.send("calculate")) {}
+    for await (const _ of session.send("calculate")) {
+    }
 
     const transcript = session.transcript;
     const last = transcript[transcript.length - 1];
@@ -627,9 +653,13 @@ test("17. interruption during later agent turn records correct partial segment",
     };
 
     const session = new Session(mockRuntime as any);
-    await assert.rejects(async () => {
-        for await (const _ of session.send("search", controller.signal)) {}
-    }, (err: any) => err.name === "AbortError" || /aborted/i.test(err.message));
+    await assert.rejects(
+        async () => {
+            for await (const _ of session.send("search", controller.signal)) {
+            }
+        },
+        (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
 
     const transcript = session.transcript;
     assert.strictEqual(transcript.length, 3);

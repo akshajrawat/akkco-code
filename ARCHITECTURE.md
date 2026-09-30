@@ -42,3 +42,10 @@ Gemini ─────┤
 Ollama ─────┼──> ModelProvider
 Akkco Model ┘
 ```
+
+## Development Guardrails
+
+- Formatting: Automated with Prettier matching repository standards (`printWidth: 100`, `tabWidth: 4`, double quotes, semicolons, trailing commas).
+- Git Hooks: Managed with Husky and `lint-staged`.
+    - `pre-commit`: Runs Prettier against staged source/config files via `lint-staged`.
+    - `pre-push`: Runs TypeScript typecheck (`npm run typecheck`) and the full test suite (`npm test`) without mutating files.
