@@ -5,6 +5,7 @@
 - Always use async versions of file operations.
 - After every meaningful repo change, update `ARCHITECTURE.md` so it reflects the current methodology, package structure, and architecture.
 - Run the necessary tests, type checks, linters, and other relevant verification after making changes.
+- Dont keep again and again making a function if such function already exist anywhere from where it can be used
 
 ## Repository Structure
 

@@ -17,7 +17,7 @@ akkco-code/
 
 3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest` (`items`, `tools`, `signal`), and discriminated `ModelEvent` union (`ModelTextEvent`, `ModelToolCallEvent`).
 
-4. `packages/providers` : Implements concrete providers organized in provider-specific folders (e.g. `openai-compatible/`) connecting to model APIs using the common contracts. Under `openai-compatible/`, responsibilities are strictly factored into `request-mapper.ts` (translates provider-neutral `ModelRequest`, `ModelItem` messages/tool calls/results, and `ModelTool` definitions into OpenAI-compatible payload), `stream-parser.ts` (decodes SSE chunks, emits text deltas, incrementally accumulates fragmented `tool_calls` by index/id, safely validates and parses JSON arguments upon completion, and prevents duplicate emissions or incomplete calls on cancellation), and `openai-compatible-provider.ts` (fetch, HTTP status handling, response streaming, cancellation orchestration). Public API boundary is `packages/providers/src/index.ts`.
+4. `packages/providers` : Implements concrete providers organized in provider-specific folders (e.g. `openai-compatible/`) connecting to model APIs using the common contracts. Under `openai-compatible/`, responsibilities are strictly factored into `request-mapper.ts` (translates provider-neutral `ModelRequest`, `ModelItem` messages/tool calls/results, and `ModelTool` definitions into OpenAI-compatible payload), `stream-parser.ts` (decodes SSE chunks, emits text deltas, incrementally accumulates fragmented `tool_calls` by index/id, safely validates and parses JSON arguments upon completion, and prevents duplicate emissions or incomplete calls on cancellation), and `openai-compatible-provider.ts` (fetch, HTTP status handling, response streaming, cancellation orchestration). Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`) for models/providers that understand tools conceptually but do not emit native structured tool calls (e.g. Ollama + `qwen2.5-coder:3b`). It converts historical `ModelToolCall` and `ModelToolResult` items into textual protocol messages (`<akkco_tool_call>`, `<akkco_tool_result>`) and injects ephemeral tool instructions into the request sent to the wrapped provider with `tools: undefined`. It parses incoming model text envelopes into provider-neutral `ModelToolCallEvent`s while streaming normal text without buffering delays. Public API boundary is `packages/providers/src/index.ts`.
 
 5. `packages/tools` : Organised into `core/` (`types`, `executor`, `registry`), `repository/` (`repository-tools`, `filesystem/` tools: `read_file`, `list_files`, `search_text` with path security boundary), and `model/` (`model-tool-adapter`). Concrete tools strictly correlate schema and input via `ToolDefinition<TSchema>`, while dynamic registries erase schemas through `AnyToolDefinition`. The model tool adapter bridges executable `ToolDefinition` to provider-neutral `ModelTool` descriptions (`toModelTool`, `toModelTools`), converting Zod schemas to clean JSON Schemas while stripping execution details and schema metadata. Depends on `@akkco/models` for the contract without circular dependencies. Public API boundary is `packages/tools/src/index.ts`.
 
@@ -42,6 +42,42 @@ Gemini ─────┤
 Ollama ─────┼──> ModelProvider
 Akkco Model ┘
 ```
+
+### Tool Execution Modes
+
+#### Native Mode
+
+```
+Provider
+   ↓
+ModelEvent
+   ↓
+Runtime
+```
+
+#### Compatibility Mode (`AKKCO_TOOL_MODE=compatibility`)
+
+```
+Provider
+   ↓
+ModelTextEvent
+   ↓
+Text Tool Compatibility Provider
+   ↓
+ModelToolCallEvent
+   ↓
+Runtime
+```
+
+In compatibility mode, the wrapper intercepts requests before invoking the wrapped provider:
+
+- Injects an ephemeral system instruction defining available tools and the `<akkco_tool_call>` protocol.
+- Strips native `request.tools` (`tools: undefined`) to prevent native and textual tool protocols competing.
+- Converts previous `ModelToolCall` items into assistant messages with `<akkco_tool_call>` envelopes.
+- Converts previous `ModelToolResult` items into user messages with `<akkco_tool_result call_id="..." status="...">` envelopes.
+- Emits real-time `ModelTextEvent` chunks for non-protocol prose without buffering delays.
+- Buffers and validates exact `<akkco_tool_call>` envelopes and emits standard `ModelToolCallEvent`s to Runtime.
+- Runtime remains completely provider-neutral and unaware whether events originated natively or via compatibility.
 
 ## Development Guardrails
 

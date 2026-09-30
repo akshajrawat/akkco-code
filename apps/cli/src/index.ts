@@ -1,15 +1,28 @@
 import { createAkkcoRuntime, Session, type RuntimeToolHost } from "@akkco/core";
-import { OpenAICompatibleProvider } from "@akkco/providers";
+import { createTextToolCompatibilityProvider, OpenAICompatibleProvider } from "@akkco/providers";
 import { createRepositoryTools, createToolRegistry, toModelTools } from "@akkco/tools";
 import process, { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 
 const main = async () => {
-    const provider = new OpenAICompatibleProvider({
+    const toolMode = process.env.AKKCO_TOOL_MODE ?? "native";
+    if (toolMode !== "native" && toolMode !== "compatibility") {
+        console.error(
+            `Invalid AKKCO_TOOL_MODE: "${toolMode}". Supported values are "native" and "compatibility".\n`,
+        );
+        process.exit(1);
+    }
+
+    const nativeProvider = new OpenAICompatibleProvider({
         baseUrl: process.env.AKKCO_BASE_URL ?? "http://localhost:11434/v1",
         model: process.env.AKKCO_MODEL ?? "qwen2.5-coder:3b",
         apiKey: process.env.AKKCO_API_KEY,
     });
+    const provider =
+        toolMode === "compatibility"
+            ? createTextToolCompatibilityProvider(nativeProvider)
+            : nativeProvider;
+
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
     const toolHost: RuntimeToolHost = {
         get tools() {

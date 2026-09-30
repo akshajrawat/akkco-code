@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,23 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.resolve(__dirname, "../src/index.ts");
 const tsxBin = path.resolve(__dirname, "../../../node_modules/.bin/tsx");
+
+const waitForOutput = async (predicate: () => boolean, timeoutMs = 5000) => {
+    const start = Date.now();
+    while (!predicate()) {
+        if (Date.now() - start > timeoutMs) {
+            throw new Error(`Timed out waiting for output after ${timeoutMs}ms`);
+        }
+        await new Promise((r) => setTimeout(r, 20));
+    }
+};
+
+const waitForExit = (cp: ChildProcess): Promise<number | null> => {
+    if (cp.exitCode !== null) {
+        return Promise.resolve(cp.exitCode);
+    }
+    return new Promise<number | null>((resolve) => cp.on("exit", resolve));
+};
 
 test("Ctrl+C (SIGINT) cancels active generation without killing the CLI, allowing subsequent generation", async () => {
     let turnCount = 0;
@@ -42,25 +59,24 @@ test("Ctrl+C (SIGINT) cancels active generation without killing the CLI, allowin
     cp.stderr.on("data", (d) => (output += d.toString()));
 
     try {
-        // Wait for CLI to start up and print prompt
-        await new Promise((r) => setTimeout(r, 600));
+        await waitForOutput(() => output.includes("> "));
 
         // 1. Send first message
         cp.stdin.write("first turn\n");
-        await new Promise((r) => setTimeout(r, 300));
+        await waitForOutput(() => output.includes("slow response"));
 
         // 2. Send SIGINT to cancel active generation
         cp.kill("SIGINT");
-        await new Promise((r) => setTimeout(r, 300));
+        await waitForOutput(() => output.includes("Generation cancelled."));
 
         // 3. Send second message to verify CLI is still alive and Session can run another generation
         cp.stdin.write("second turn\n");
-        await new Promise((r) => setTimeout(r, 400));
+        await waitForOutput(() => output.includes("completed second response"));
 
         // 4. Send /exit
         cp.stdin.write("/exit\n");
 
-        const exitCode = await new Promise<number | null>((resolve) => cp.on("exit", resolve));
+        const exitCode = await waitForExit(cp);
         assert.strictEqual(exitCode, 0);
 
         assert.match(output, /slow response/);
@@ -82,14 +98,12 @@ test("Ctrl+C (SIGINT) while idle at the prompt cleanly exits the CLI", async () 
     let output = "";
     cp.stdout.on("data", (d) => (output += d.toString()));
 
-    // Wait for prompt
-    await new Promise((r) => setTimeout(r, 600));
+    await waitForOutput(() => output.includes("> "));
 
     // Send SIGINT while idle
     cp.kill("SIGINT");
 
-    const exitCode = await new Promise<number | null>((resolve) => cp.on("exit", resolve));
-    // POSIX SIGINT exit status is non-zero (130) or clean exit (0)
+    const exitCode = await waitForExit(cp);
     assert.ok(exitCode === 0 || exitCode === 130, `Unexpected exit code: ${exitCode}`);
     assert.match(output, /Akkco Code/);
 });
@@ -106,28 +120,28 @@ test("CLI /tools and /tool commands execute tools and handle errors gracefully",
     cp.stderr.on("data", (d) => (output += d.toString()));
 
     try {
-        await new Promise((r) => setTimeout(r, 600));
+        await waitForOutput(() => output.includes("> "));
 
         // 1. Test /tools
         cp.stdin.write("/tools\n");
-        await new Promise((r) => setTimeout(r, 300));
+        await waitForOutput(() => output.includes("Available tools:"));
 
         // 2. Test valid /tool execution
         cp.stdin.write('/tool read_file {"path":"packages/tools/package.json"}\n');
-        await new Promise((r) => setTimeout(r, 300));
+        await waitForOutput(() => output.includes('"@akkco/tools"'));
 
         // 3. Test invalid JSON error handling
         cp.stdin.write("/tool read_file {invalid-json\n");
-        await new Promise((r) => setTimeout(r, 300));
+        await waitForOutput(() => output.includes("Error: Invalid JSON input for tool."));
 
         // 4. Test unknown tool error handling
         cp.stdin.write("/tool unknown_tool {}\n");
-        await new Promise((r) => setTimeout(r, 300));
+        await waitForOutput(() => output.includes("Error: Unknown tool: unknown_tool"));
 
         // 5. Clean exit
         cp.stdin.write("/exit\n");
 
-        const exitCode = await new Promise<number | null>((resolve) => cp.on("exit", resolve));
+        const exitCode = await waitForExit(cp);
         assert.strictEqual(exitCode, 0);
 
         // Verify /tools output
@@ -146,4 +160,40 @@ test("CLI /tools and /tool commands execute tools and handle errors gracefully",
     } finally {
         cp.kill();
     }
+});
+
+test("CLI rejects invalid AKKCO_TOOL_MODE with error code 1", async () => {
+    const cp = spawn(tsxBin, [cliEntry], {
+        env: { ...process.env, AKKCO_TOOL_MODE: "unsupported_mode" },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    cp.stderr.on("data", (d) => (stderr += d.toString()));
+
+    const exitCode = await waitForExit(cp);
+    assert.strictEqual(exitCode, 1);
+    assert.match(stderr, /Invalid AKKCO_TOOL_MODE: "unsupported_mode"/);
+});
+
+test("CLI accepts AKKCO_TOOL_MODE=compatibility cleanly", async () => {
+    const cp = spawn(tsxBin, [cliEntry], {
+        env: {
+            ...process.env,
+            AKKCO_TOOL_MODE: "compatibility",
+            AKKCO_BASE_URL: "http://127.0.0.1:1/v1",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let output = "";
+    cp.stdout.on("data", (d) => (output += d.toString()));
+
+    await waitForOutput(() => output.includes("> "));
+    cp.stdin.write("/exit\n");
+
+    const exitCode = await waitForExit(cp);
+    assert.strictEqual(exitCode, 0);
+    assert.match(output, /Akkco Code/);
+    assert.match(output, /Goodbye\./);
 });
