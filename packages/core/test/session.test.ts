@@ -479,7 +479,7 @@ test("clear() semantics remain correct", async () => {
     assert.deepStrictEqual(session.transcript, []);
 });
 
-test("13. assistant text before a tool is committed before tool transcript", async () => {
+test("assistant text before a tool is committed before tool transcript", async () => {
     const mockRuntime = {
         run: () => ({
             async *[Symbol.asyncIterator]() {
@@ -523,7 +523,7 @@ test("13. assistant text before a tool is committed before tool transcript", asy
     });
 });
 
-test("14. successful tool execution recorded chronologically", async () => {
+test("successful tool execution recorded chronologically", async () => {
     const mockRuntime = {
         run: () => ({
             async *[Symbol.asyncIterator]() {
@@ -561,7 +561,7 @@ test("14. successful tool execution recorded chronologically", async () => {
     });
 });
 
-test("15. failed tool execution recorded chronologically", async () => {
+test("failed tool execution recorded chronologically", async () => {
     const mockRuntime = {
         run: () => ({
             async *[Symbol.asyncIterator]() {
@@ -599,7 +599,7 @@ test("15. failed tool execution recorded chronologically", async () => {
     });
 });
 
-test("16. final assistant segment committed after tool interaction", async () => {
+test("final assistant segment committed after tool interaction", async () => {
     const mockRuntime = {
         run: () => ({
             async *[Symbol.asyncIterator]() {
@@ -630,7 +630,7 @@ test("16. final assistant segment committed after tool interaction", async () =>
     }
 });
 
-test("17. interruption during later agent turn records correct partial segment", async () => {
+test("interruption during later agent turn records correct partial segment", async () => {
     const controller = new AbortController();
     const mockRuntime = {
         run: () => ({

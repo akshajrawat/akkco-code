@@ -112,10 +112,23 @@ Keyboard Ctrl+C and process SIGINT use the controller's interrupt handler. Activ
 
 If either standard stream is non-TTY, or `TERM=dumb`, `plain-cli.ts` uses buffered readline input and ordinary stream writes. It queues lines while a turn runs and drains the last line at EOF. This preserves incremental assistant output, commands, explicit tool results, and stderr errors without styling, cursor controls, or raw mode, even when `FORCE_COLOR` is set. `/exit` discards subsequent queued lines; EOF drains pending turns without a farewell.
 
+### Pseudo-Terminal (PTY) End-to-End Testing
+
+To test the real interactive TUI end-to-end without mocking React or terminal I/O, `apps/cli/test/pty/` provides a headless terminal test harness:
+
+- **Process Boundary (`node-pty`)**: Spawns the actual Node/tsx process running `apps/cli/src/index.ts` attached to a genuine pseudo-terminal (TTY). This exercises the real TTY detection, `enterTerminal()` alternate screen setup, raw mode input streaming, Ink rendering pipeline, and OS signal handlers (`SIGINT`/`SIGTERM`).
+- **Screen Model (`@xterm/headless`)**: ANSI escape streams emitted by Ink are parsed into an in-memory terminal grid using `@xterm/headless`. `Screen` (`screen.ts`) exposes normalized viewport text with right-trimmed lines and viewport boundaries, eliminating brittle regexes or manual ANSI stripping.
+- **Deterministic Test Provider (`test-provider.ts`)**: To keep tests offline, fast, and deterministic without external LLM dependencies, `AKKCO_TEST_PROVIDER=1` routes model calls to `DeterministicTestProvider`. It supports deterministic text streaming, automatic tool loops (`__TEST_TOOL__`), multi-line scrolling content (`__TEST_LONG__`), and long-running cancellable tasks (`__TEST_WAIT__`).
+- **Testing Pyramid & Split Execution**:
+    - `npm test`: Fast unit and component test loop (~7s) covering tool execution, providers, compatibility adapters, layout logic, command parsing, and component rendering.
+    - `npm run test:tui`: Dedicated PTY E2E suite (~18s) testing complete interactive workflows (startup, autocomplete, keyboard navigation, Tab completion, `/clear` and `/exit`, streaming responses, tool loops, multiline paste, resizing, scrollback, and process cleanup).
+    - `npm run verify`: Full verification pipeline executing formatting check, TypeScript typecheck, unit tests, and the PTY E2E suite.
+- **Native Build Requirements**: `node-pty` compiles a native node addon during installation using standard build tools (`make`, `g++`, and Python 3 on Linux/WSL).
+
 ## Development Guardrails
 
 - Formatting: Automated with Prettier matching repository standards (`printWidth: 100`, `tabWidth: 4`, double quotes, semicolons, trailing commas).
 - Git Hooks: Managed with Husky and `lint-staged`.
     - `pre-commit`: Runs Prettier against staged source/config files, including `.tsx`, via `lint-staged`.
     - `pre-push`: Runs TypeScript typecheck (`npm run typecheck`) and the full test suite (`npm test`) without mutating files.
-- Verification: `npm run verify` runs formatting checks, TypeScript typechecking (including React JSX), and the full workspace test suite. CLI tests cover piped commands and generation, tool event ordering in both modes, EOF handling, full-screen layout calculations, resize and history scrolling, tool and cancellation states, deliberate multiline-paste submission, and terminal restoration.
+- Verification: `npm run verify` runs formatting checks, TypeScript typechecking (including React JSX), the unit test suite, and the PTY E2E suite. CLI tests cover piped commands and generation, tool event ordering in both modes, EOF handling, full-screen layout calculations, resize and history scrolling, tool and cancellation states, deliberate multiline-paste submission, and terminal restoration.

@@ -53,8 +53,8 @@ const collectEvents = async (
     return events;
 };
 
-// 1. normal text streams without waiting for complete response
-test("1. normal text streams without waiting for complete response", async () => {
+// normal text streams without waiting for complete response
+test("normal text streams without waiting for complete response", async () => {
     let secondChunkResolved = false;
     let resolveSecondChunk: () => void;
     const secondChunkPromise = new Promise<void>((resolve) => {
@@ -95,8 +95,8 @@ test("1. normal text streams without waiting for complete response", async () =>
     assert.strictEqual(finalResult.done, true);
 });
 
-// 2. exact compatibility envelope becomes one ModelToolCallEvent
-test("2. exact compatibility envelope becomes one ModelToolCallEvent", async () => {
+// exact compatibility envelope becomes one ModelToolCallEvent
+test("exact compatibility envelope becomes one ModelToolCallEvent", async () => {
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
             yield {
@@ -121,8 +121,8 @@ test("2. exact compatibility envelope becomes one ModelToolCallEvent", async () 
     assert.match(event.id, /^compat_/);
 });
 
-// 3. opening tag split across multiple ModelTextEvent chunks works
-test("3. opening tag split across multiple ModelTextEvent chunks works", async () => {
+// opening tag split across multiple ModelTextEvent chunks works
+test("opening tag split across multiple ModelTextEvent chunks works", async () => {
     const chunks = [
         "<ak",
         "kco_",
@@ -150,8 +150,8 @@ test("3. opening tag split across multiple ModelTextEvent chunks works", async (
     assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
 });
 
-// 4. tool JSON split across multiple chunks works
-test("4. tool JSON split across multiple chunks works", async () => {
+// tool JSON split across multiple chunks works
+test("tool JSON split across multiple chunks works", async () => {
     const chunks = [
         "<akkco_tool_call>\n",
         '{"name": "read_file", ',
@@ -180,8 +180,8 @@ test("4. tool JSON split across multiple chunks works", async () => {
     assert.deepStrictEqual(events[0].arguments, { path: "deep/path/file.txt" });
 });
 
-// 5. closing tag split across chunks works
-test("5. closing tag split across chunks works", async () => {
+// closing tag split across chunks works
+test("closing tag split across chunks works", async () => {
     const chunks = [
         '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akk',
         "co_tool",
@@ -208,8 +208,8 @@ test("5. closing tag split across chunks works", async () => {
     assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
 });
 
-// 6. plain JSON remains ordinary text
-test("6. plain JSON remains ordinary text", async () => {
+// plain JSON remains ordinary text
+test("plain JSON remains ordinary text", async () => {
     const jsonText = '{"name":"read_file","arguments":{"path":"foo.ts"}}';
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
@@ -228,8 +228,8 @@ test("6. plain JSON remains ordinary text", async () => {
     assert.strictEqual(events[0].content, jsonText);
 });
 
-// 7. envelope appearing inside prose remains ordinary text
-test("7. envelope appearing inside prose remains ordinary text", async () => {
+// envelope appearing inside prose remains ordinary text
+test("envelope appearing inside prose remains ordinary text", async () => {
     const prose =
         'Here is what I plan to do:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nWhat do you think?';
     const mock = new MockModelProvider((_req) => ({
@@ -249,8 +249,8 @@ test("7. envelope appearing inside prose remains ordinary text", async () => {
     assert.strictEqual(events[0].content, prose);
 });
 
-// 8. prose before envelope prevents execution
-test("8. prose before envelope prevents execution", async () => {
+// prose before envelope prevents execution
+test("prose before envelope prevents execution", async () => {
     const chunks = [
         "I will call the tool:\n",
         '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
@@ -275,8 +275,8 @@ test("8. prose before envelope prevents execution", async () => {
     assert.strictEqual(combined, chunks.join(""));
 });
 
-// 9. prose after envelope throws compatibility protocol error
-test("9. prose after envelope throws compatibility protocol error", async () => {
+// prose after envelope throws compatibility protocol error
+test("prose after envelope throws compatibility protocol error", async () => {
     const chunks = [
         '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
         "\nI have issued the request.",
@@ -305,8 +305,8 @@ test("9. prose after envelope throws compatibility protocol error", async () => 
     );
 });
 
-// 10. two envelopes in one response throws compatibility protocol error
-test("10. two envelopes in one response throws compatibility protocol error", async () => {
+// two envelopes in one response throws compatibility protocol error
+test("two envelopes in one response throws compatibility protocol error", async () => {
     const content =
         '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>' +
         '<akkco_tool_call>{"name":"read_file","arguments":{"path":"b.ts"}}</akkco_tool_call>';
@@ -330,8 +330,8 @@ test("10. two envelopes in one response throws compatibility protocol error", as
     );
 });
 
-// 10b. valid envelope followed by another envelope in separate chunks throws
-test("10b. valid envelope followed by another envelope in separate chunks throws", async () => {
+// valid envelope followed by another envelope in separate chunks throws
+test("valid envelope followed by another envelope in separate chunks throws", async () => {
     const chunks = [
         '<akkco_tool_call>\n{"name":"read_file","arguments":{"path":"a.ts"}}\n</akkco_tool_call>\n\n',
         '<akkco_tool_call>\n{"name":"read_file","arguments":{"path":"b.ts"}}\n</akkco_tool_call>',
@@ -358,8 +358,8 @@ test("10b. valid envelope followed by another envelope in separate chunks throws
     );
 });
 
-// 11. malformed JSON inside an otherwise exact envelope throws a useful error
-test("11. malformed JSON inside an otherwise exact envelope throws a useful error", async () => {
+// malformed JSON inside an otherwise exact envelope throws a useful error
+test("malformed JSON inside an otherwise exact envelope throws a useful error", async () => {
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
             yield {
@@ -381,8 +381,8 @@ test("11. malformed JSON inside an otherwise exact envelope throws a useful erro
     );
 });
 
-// 12. missing/invalid name throws useful error
-test("12. missing/invalid name throws useful error", async () => {
+// missing/invalid name throws useful error
+test("missing/invalid name throws useful error", async () => {
     // Missing name
     const mockMissing = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
@@ -447,8 +447,8 @@ test("12. missing/invalid name throws useful error", async () => {
     );
 });
 
-// 13. unadvertised tool cannot become a tool-call event
-test("13. unadvertised tool cannot become a tool-call event", async () => {
+// unadvertised tool cannot become a tool-call event
+test("unadvertised tool cannot become a tool-call event", async () => {
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
             yield {
@@ -471,8 +471,8 @@ test("13. unadvertised tool cannot become a tool-call event", async () => {
     );
 });
 
-// 14. generated compatibility call ID is non-empty
-test("14. generated compatibility call ID is non-empty", async () => {
+// generated compatibility call ID is non-empty
+test("generated compatibility call ID is non-empty", async () => {
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
             yield {
@@ -495,8 +495,8 @@ test("14. generated compatibility call ID is non-empty", async () => {
     assert.ok(typeof toolCall.id === "string" && toolCall.id.trim().length > 0);
 });
 
-// 15. separate generated calls receive different IDs
-test("15. separate generated calls receive different IDs", async () => {
+// separate generated calls receive different IDs
+test("separate generated calls receive different IDs", async () => {
     const makeProvider = () =>
         new MockModelProvider((_req) => ({
             async *[Symbol.asyncIterator]() {
@@ -525,8 +525,8 @@ test("15. separate generated calls receive different IDs", async () => {
     assert.notStrictEqual(events1[0].id, events2[0].id);
 });
 
-// 16. native ModelToolCallEvent passes through unchanged
-test("16. native ModelToolCallEvent passes through unchanged", async () => {
+// native ModelToolCallEvent passes through unchanged
+test("native ModelToolCallEvent passes through unchanged", async () => {
     const nativeEvent: ModelEvent = {
         type: "tool_call",
         id: "call_native_999",
@@ -551,8 +551,8 @@ test("16. native ModelToolCallEvent passes through unchanged", async () => {
     assert.strictEqual(events[0].id, "call_native_999");
 });
 
-// 17. compatibility system instruction contains tool name
-test("17. compatibility system instruction contains tool name", async () => {
+// compatibility system instruction contains tool name
+test("compatibility system instruction contains tool name", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -578,8 +578,8 @@ test("17. compatibility system instruction contains tool name", async () => {
     assert.match(systemMsg.content, /list_files/);
 });
 
-// 18. instruction contains description
-test("18. instruction contains description", async () => {
+// instruction contains description
+test("instruction contains description", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -603,8 +603,8 @@ test("18. instruction contains description", async () => {
     assert.match(systemMsg.content, /Read contents of a file/);
 });
 
-// 19. instruction contains JSON schema
-test("19. instruction contains JSON schema", async () => {
+// instruction contains JSON schema
+test("instruction contains JSON schema", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -633,8 +633,8 @@ test("19. instruction contains JSON schema", async () => {
     );
 });
 
-// 19b. compatibility instruction explicitly says one tool call per turn and never multiple envelopes
-test("19b. compatibility instruction explicitly says one tool call per turn and never multiple envelopes", async () => {
+// compatibility instruction explicitly says one tool call per turn and never multiple envelopes
+test("compatibility instruction explicitly says one tool call per turn and never multiple envelopes", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -662,8 +662,8 @@ test("19b. compatibility instruction explicitly says one tool call per turn and 
     );
 });
 
-// 19c. compatibility instruction says to wait for result before requesting another tool
-test("19c. compatibility instruction says to wait for result before requesting another tool", async () => {
+// compatibility instruction says to wait for result before requesting another tool
+test("compatibility instruction says to wait for result before requesting another tool", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -691,8 +691,8 @@ test("19c. compatibility instruction says to wait for result before requesting a
     );
 });
 
-// 19d. compatibility instruction says repository-wide search should use "." or omit path rather than "*"
-test('19d. compatibility instruction says repository-wide search should use "." or omit path rather than "*"', async () => {
+// compatibility instruction says repository-wide search should use "." or omit path rather than "*"
+test('compatibility instruction says repository-wide search should use "." or omit path rather than "*"', async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -721,8 +721,8 @@ test('19d. compatibility instruction says repository-wide search should use "." 
     assert.match(systemMsg.content, /Glob syntax such as "\*" is NOT supported/i);
 });
 
-// 19e. compatibility instruction says do not answer from memory and do not explain protocol to user
-test("19e. compatibility instruction says do not answer from memory and do not explain protocol to user", async () => {
+// compatibility instruction says do not answer from memory and do not explain protocol to user
+test("compatibility instruction says do not answer from memory and do not explain protocol to user", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -750,8 +750,8 @@ test("19e. compatibility instruction says do not answer from memory and do not e
     );
 });
 
-// 20. original ModelRequest is not mutated
-test("20. original ModelRequest is not mutated", async () => {
+// original ModelRequest is not mutated
+test("original ModelRequest is not mutated", async () => {
     const originalTools: ModelTool[] = [sampleTool];
     const originalItems: ModelItem[] = [{ type: "message", role: "user", content: "Hello" }];
     const originalRequest: ModelRequest = {
@@ -774,8 +774,8 @@ test("20. original ModelRequest is not mutated", async () => {
     assert.strictEqual(originalRequest.items.length, 1);
 });
 
-// 21. original request.items is not mutated
-test("21. original request.items is not mutated", async () => {
+// original request.items is not mutated
+test("original request.items is not mutated", async () => {
     const item1: ModelMessage = { type: "message", role: "user", content: "hello" };
     const item2: ModelToolCall = {
         type: "tool_call",
@@ -802,8 +802,8 @@ test("21. original request.items is not mutated", async () => {
     assert.strictEqual((item2 as ModelToolCall).id, "call_orig");
 });
 
-// 22. native request.tools are not forwarded to wrapped provider
-test("22. native request.tools are not forwarded to wrapped provider", async () => {
+// native request.tools are not forwarded to wrapped provider
+test("native request.tools are not forwarded to wrapped provider", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -824,8 +824,8 @@ test("22. native request.tools are not forwarded to wrapped provider", async () 
     assert.strictEqual(capturedRequest.tools, undefined);
 });
 
-// 23. previous ModelToolCall becomes compatibility textual history
-test("23. previous ModelToolCall becomes compatibility textual history", async () => {
+// previous ModelToolCall becomes compatibility textual history
+test("previous ModelToolCall becomes compatibility textual history", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -862,8 +862,8 @@ test("23. previous ModelToolCall becomes compatibility textual history", async (
     assert.match(assistantMsg.content, /<\/akkco_tool_call>/);
 });
 
-// 24. previous successful ModelToolResult becomes successful result envelope
-test("24. previous successful ModelToolResult becomes successful result envelope", async () => {
+// previous successful ModelToolResult becomes successful result envelope
+test("previous successful ModelToolResult becomes successful result envelope", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -899,8 +899,8 @@ test("24. previous successful ModelToolResult becomes successful result envelope
     assert.match(resultMsg.content, /<\/akkco_tool_result>/);
 });
 
-// 25. previous failed ModelToolResult becomes error result envelope
-test("25. previous failed ModelToolResult becomes error result envelope", async () => {
+// previous failed ModelToolResult becomes error result envelope
+test("previous failed ModelToolResult becomes error result envelope", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -936,8 +936,8 @@ test("25. previous failed ModelToolResult becomes error result envelope", async 
     assert.match(resultMsg.content, /<\/akkco_tool_result>/);
 });
 
-// 26. history order remains correct
-test("26. history order remains correct", async () => {
+// history order remains correct
+test("history order remains correct", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -1000,8 +1000,8 @@ test("26. history order remains correct", async () => {
     assert.strictEqual((capturedRequest.items[5] as ModelMessage).content, "Second turn");
 });
 
-// 27. no tools means wrapper behaves transparently
-test("27. no tools means wrapper behaves transparently", async () => {
+// no tools means wrapper behaves transparently
+test("no tools means wrapper behaves transparently", async () => {
     let capturedRequest: ModelRequest | undefined;
     const mock = new MockModelProvider((req) => {
         capturedRequest = req;
@@ -1027,8 +1027,8 @@ test("27. no tools means wrapper behaves transparently", async () => {
     assert.strictEqual(events[0].content, "<akkco_tool_call>not touched</akkco_tool_call>");
 });
 
-// 28. cancellation during partial opening marker emits no tool call
-test("28. cancellation during partial opening marker emits no tool call", async () => {
+// cancellation during partial opening marker emits no tool call
+test("cancellation during partial opening marker emits no tool call", async () => {
     const controller = new AbortController();
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
@@ -1057,8 +1057,8 @@ test("28. cancellation during partial opening marker emits no tool call", async 
     assert.strictEqual(events.length, 0);
 });
 
-// 29. cancellation during partial JSON body emits no tool call
-test("29. cancellation during partial JSON body emits no tool call", async () => {
+// cancellation during partial JSON body emits no tool call
+test("cancellation during partial JSON body emits no tool call", async () => {
     const controller = new AbortController();
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {
@@ -1087,8 +1087,8 @@ test("29. cancellation during partial JSON body emits no tool call", async () =>
     assert.strictEqual(events.length, 0);
 });
 
-// 30. normal streaming behavior remains intact
-test("30. normal streaming behavior remains intact", async () => {
+// normal streaming behavior remains intact
+test("normal streaming behavior remains intact", async () => {
     const chunks = ["This ", "is ", "a ", "normal ", "multi-chunk ", "stream."];
     const mock = new MockModelProvider((_req) => ({
         async *[Symbol.asyncIterator]() {

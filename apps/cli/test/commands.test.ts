@@ -92,7 +92,7 @@ const createMockContext = (
     };
 };
 
-test("1. normal input is not treated as a command", async () => {
+test("normal input is not treated as a command", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
     const context = createMockContext(toolRegistry);
@@ -108,7 +108,7 @@ test("1. normal input is not treated as a command", async () => {
     assert.strictEqual(context.history.length, 0);
 });
 
-test("2. /exit dispatches correctly", async () => {
+test("/exit dispatches correctly", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
     const context = createMockContext(toolRegistry);
@@ -136,7 +136,7 @@ test("2. /exit dispatches correctly", async () => {
     );
 });
 
-test("3. /clear dispatches correctly", async () => {
+test("/clear dispatches correctly", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
     const context = createMockContext(toolRegistry);
@@ -151,7 +151,7 @@ test("3. /clear dispatches correctly", async () => {
     );
 });
 
-test("4. /tools dispatches correctly", async () => {
+test("/tools dispatches correctly", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
     const context = createMockContext(toolRegistry);
@@ -172,7 +172,7 @@ test("4. /tools dispatches correctly", async () => {
     }
 });
 
-test("5. /tool parses command name and raw arguments correctly", async () => {
+test("/tool parses command name and raw arguments correctly", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry();
 
@@ -208,7 +208,7 @@ test("5. /tool parses command name and raw arguments correctly", async () => {
     assert.strictEqual((finishedTool as { status: string }).status, "completed");
 });
 
-test("6. /tool with no args preserves current usage error", async () => {
+test("/tool with no args preserves current usage error", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry();
     const context = createMockContext(toolRegistry);
@@ -225,7 +225,7 @@ test("6. /tool with no args preserves current usage error", async () => {
     }
 });
 
-test("7. /tool invalid JSON preserves current error", async () => {
+test("/tool invalid JSON preserves current error", async () => {
     const registry = createBuiltinCommandRegistry();
     const toolRegistry = createToolRegistry();
     const context = createMockContext(toolRegistry);
@@ -238,7 +238,7 @@ test("7. /tool invalid JSON preserves current error", async () => {
     assert.strictEqual(context.notices[0]?.kind, "error");
 });
 
-test("8. unknown slash command returns a useful error and is NOT sent to Session", async () => {
+test("unknown slash command returns a useful error and is NOT sent to Session", async () => {
     let streamCalled = false;
     const provider = createMockProvider(["should not receive this"], () => {
         streamCalled = true;
@@ -268,7 +268,7 @@ test("8. unknown slash command returns a useful error and is NOT sent to Session
     assert.ok(noticeItem, "Expected Unknown command: /banana notice in history");
 });
 
-test("9. command registry rejects duplicate command names if registration is dynamic", () => {
+test("command registry rejects duplicate command names if registration is dynamic", () => {
     const registry = createCommandRegistry();
 
     const dummyCommand: CliCommand = {
@@ -302,7 +302,7 @@ test("9. command registry rejects duplicate command names if registration is dyn
     );
 });
 
-test("10. controller still prevents concurrent submissions while async command execution is running", async () => {
+test("controller still prevents concurrent submissions while async command execution is running", async () => {
     const toolRegistry = createToolRegistry();
     let releaseToolExecution = () => {};
 
@@ -347,7 +347,7 @@ test("10. controller still prevents concurrent submissions while async command e
     assert.strictEqual(userMessages.length, 0);
 });
 
-test("11. existing /clear Session semantics remain intact", async () => {
+test("existing /clear Session semantics remain intact", async () => {
     const provider = createMockProvider(["turn 1 response", "turn 2 response"]);
     const toolRegistry = createToolRegistry(createRepositoryTools(process.cwd()));
     const controller = createCliController({ provider, toolRegistry });
@@ -370,7 +370,7 @@ test("11. existing /clear Session semantics remain intact", async () => {
     }
 });
 
-test("12. existing manual tool result/error rendering semantics remain intact", async () => {
+test("existing manual tool result/error rendering semantics remain intact", async () => {
     const toolRegistry = createToolRegistry();
 
     toolRegistry.register({

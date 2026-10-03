@@ -3,7 +3,7 @@ import test from "node:test";
 import { createAkkcoRuntime, type RuntimeEvent, type RuntimeToolHost } from "../src/index.js";
 import type { ModelEvent, ModelProvider, ModelRequest, ModelTool } from "@akkco/models";
 
-test("1. text-only provider response", async () => {
+test("text-only provider response", async () => {
     let callCount = 0;
     const provider: ModelProvider = {
         id: "mock",
@@ -36,7 +36,7 @@ test("1. text-only provider response", async () => {
     assert.deepStrictEqual(events, [{ type: "text", content: "Hello world" }]);
 });
 
-test("2. runtime advertises ModelTool[] to provider", async () => {
+test("runtime advertises ModelTool[] to provider", async () => {
     const dummyTools: ModelTool[] = [
         {
             name: "read_file",
@@ -74,7 +74,7 @@ test("2. runtime advertises ModelTool[] to provider", async () => {
     assert.strictEqual(capturedTools, dummyTools);
 });
 
-test("3. model emits one tool call → runtime executes → model called again", async () => {
+test("model emits one tool call → runtime executes → model called again", async () => {
     let turn = 0;
     let toolExecuted = false;
 
@@ -132,7 +132,7 @@ test("3. model emits one tool call → runtime executes → model called again",
     assert.deepStrictEqual(events[1], { type: "text", content: "The answer is 5." });
 });
 
-test("4. tool result is present in second ModelRequest", async () => {
+test("tool result is present in second ModelRequest", async () => {
     let capturedRequests: ModelRequest[] = [];
 
     const provider: ModelProvider = {
@@ -191,7 +191,7 @@ test("4. tool result is present in second ModelRequest", async () => {
     });
 });
 
-test("5. final assistant text streams after tool result", async () => {
+test("final assistant text streams after tool result", async () => {
     let turn = 0;
     const provider: ModelProvider = {
         id: "mock",
@@ -237,7 +237,7 @@ test("5. final assistant text streams after tool result", async () => {
     assert.deepStrictEqual(events[2], { type: "text", content: "Answer" });
 });
 
-test("6. text before tool call is preserved", async () => {
+test("text before tool call is preserved", async () => {
     let capturedRequests: ModelRequest[] = [];
     const provider: ModelProvider = {
         id: "mock",
@@ -303,7 +303,7 @@ test("6. text before tool call is preserved", async () => {
     });
 });
 
-test("7. multiple tool calls in one model turn execute sequentially", async () => {
+test("multiple tool calls in one model turn execute sequentially", async () => {
     const executedOrder: string[] = [];
     let turn = 0;
 
@@ -366,7 +366,7 @@ test("7. multiple tool calls in one model turn execute sequentially", async () =
     assert.deepStrictEqual(events[2], { type: "text", content: "Both done." });
 });
 
-test("8. tool execution failure becomes isError tool result and model gets another chance", async () => {
+test("tool execution failure becomes isError tool result and model gets another chance", async () => {
     let capturedRequests: ModelRequest[] = [];
 
     const provider: ModelProvider = {
@@ -426,7 +426,7 @@ test("8. tool execution failure becomes isError tool result and model gets anoth
     });
 });
 
-test("9. unknown/hallucinated tool becomes recoverable failed tool result", async () => {
+test("unknown/hallucinated tool becomes recoverable failed tool result", async () => {
     let turn = 0;
     const provider: ModelProvider = {
         id: "mock",
@@ -479,7 +479,7 @@ test("9. unknown/hallucinated tool becomes recoverable failed tool result", asyn
     assert.deepStrictEqual(events[1], { type: "text", content: "Apologies, tool not found." });
 });
 
-test("10. cancellation stops additional tools/provider turns", async () => {
+test("cancellation stops additional tools/provider turns", async () => {
     const controller = new AbortController();
     let secondToolExecuted = false;
     let turn2Called = false;
@@ -538,7 +538,7 @@ test("10. cancellation stops additional tools/provider turns", async () => {
     assert.strictEqual(turn2Called, false);
 });
 
-test("11. maxToolIterations prevents infinite loops", async () => {
+test("maxToolIterations prevents infinite loops", async () => {
     let turns = 0;
     const provider: ModelProvider = {
         id: "mock",
@@ -575,7 +575,7 @@ test("11. maxToolIterations prevents infinite loops", async () => {
     assert.strictEqual(turns, 4);
 });
 
-test("11b. default runtime allows unlimited tool iterations without artificial limit", async () => {
+test("default runtime allows unlimited tool iterations without artificial limit", async () => {
     let turns = 0;
     const provider: ModelProvider = {
         id: "mock",
@@ -622,7 +622,7 @@ test("11b. default runtime allows unlimited tool iterations without artificial l
     }
 });
 
-test("12. runtime without ToolHost still works as existing text chat", async () => {
+test("runtime without ToolHost still works as existing text chat", async () => {
     let capturedRequest: ModelRequest | undefined;
     const provider: ModelProvider = {
         id: "mock",

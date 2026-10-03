@@ -105,7 +105,7 @@ const mount = (columns = 80, rows = 24, commandRegistry = createBuiltinCommandRe
     };
 };
 
-test("1. typing '/' returns all registered commands", () => {
+test("typing '/' returns all registered commands", () => {
     const registry = createBuiltinCommandRegistry();
     const commands = registry.list();
 
@@ -119,7 +119,7 @@ test("1. typing '/' returns all registered commands", () => {
     assert.deepStrictEqual(names, ["clear", "exit", "tool", "tools"]);
 });
 
-test("2. '/t' filters correctly", () => {
+test("'/t' filters correctly", () => {
     const registry = createBuiltinCommandRegistry();
     const commands = registry.list();
 
@@ -134,7 +134,7 @@ test("2. '/t' filters correctly", () => {
     );
 });
 
-test("3. '/to' returns /tool and /tools", () => {
+test("'/to' returns /tool and /tools", () => {
     const registry = createBuiltinCommandRegistry();
     const commands = registry.list();
 
@@ -149,25 +149,25 @@ test("3. '/to' returns /tool and /tools", () => {
     );
 });
 
-test("4. normal text does not open suggestions", () => {
+test("normal text does not open suggestions", () => {
     assert.strictEqual(getCommandPrefix("hello", 5), null);
     assert.strictEqual(getCommandPrefix("read_file", 9), null);
     assert.strictEqual(getCommandPrefix("", 0), null);
     assert.strictEqual(getCommandPrefix("   some text", 12), null);
 });
 
-test("5. 'hello /' does not open suggestions", () => {
+test("'hello /' does not open suggestions", () => {
     assert.strictEqual(getCommandPrefix("hello /", 7), null);
     assert.strictEqual(getCommandPrefix("echo /to", 8), null);
 });
 
-test("6. '/tool ' hides command-name suggestions", () => {
+test("'/tool ' hides command-name suggestions", () => {
     assert.strictEqual(getCommandPrefix("/tool ", 6), null);
     assert.strictEqual(getCommandPrefix("/tool read_file", 15), null);
     assert.strictEqual(getCommandPrefix("/clear ", 7), null);
 });
 
-test("7. ArrowDown and 8. ArrowUp change selected command with wrapping", () => {
+test("ArrowDown and ArrowUp change selected command with wrapping", () => {
     const total = 4;
 
     // Down navigation wraps: 0 -> 1 -> 2 -> 3 -> 0
@@ -192,7 +192,7 @@ test("7. ArrowDown and 8. ArrowUp change selected command with wrapping", () => 
     assert.strictEqual(index, 0);
 });
 
-test("9. Tab completes selected command with trailing space when arguments expected", () => {
+test("Tab completes selected command with trailing space when arguments expected", () => {
     const registry = createBuiltinCommandRegistry();
     const commands = registry.list();
 
@@ -213,7 +213,7 @@ test("9. Tab completes selected command with trailing space when arguments expec
     assert.strictEqual(completionNoArgs.cursor, 6);
 });
 
-test("10. Tab does not execute command", () => {
+test("Tab does not execute command", () => {
     // applyCompletion is a pure transformation; verify it only produces modified text/cursor
     const res = applyCompletion("/to", 3, {
         name: "tool",
@@ -224,7 +224,7 @@ test("10. Tab does not execute command", () => {
     assert.strictEqual(typeof res.cursor, "number");
 });
 
-test("11. Enter still submits through CliController/CommandRegistry", async () => {
+test("Enter still submits through CliController/CommandRegistry", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -248,7 +248,7 @@ test("11. Enter still submits through CliController/CommandRegistry", async () =
     }
 });
 
-test("12. Escape closes suggestions and typing allows them to reappear", async () => {
+test("Escape closes suggestions and typing allows them to reappear", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -274,7 +274,7 @@ test("12. Escape closes suggestions and typing allows them to reappear", async (
     }
 });
 
-test("13. future dynamically registered command automatically appears", () => {
+test("future dynamically registered command automatically appears", () => {
     const registry = createCommandRegistry();
 
     const futureCmd: CliCommand = {
@@ -296,7 +296,7 @@ test("13. future dynamically registered command automatically appears", () => {
     assert.strictEqual(filtered[0]?.name, "resume");
 });
 
-test("14. palette height is bounded", () => {
+test("palette height is bounded", () => {
     assert.strictEqual(calculateSuggestionsHeight(0, 5), 0);
     assert.strictEqual(calculateSuggestionsHeight(1, 5), 3); // 1 top + 1 item + 1 bottom
     assert.strictEqual(calculateSuggestionsHeight(4, 5), 6); // 1 top + 4 items + 1 bottom
@@ -304,7 +304,7 @@ test("14. palette height is bounded", () => {
     assert.strictEqual(calculateSuggestionsHeight(10, 5), 7); // bounded at maxVisible=5 (7 rows)
 });
 
-test("15. narrow terminal rendering does not overflow", () => {
+test("narrow terminal rendering does not overflow", () => {
     const registry = createBuiltinCommandRegistry();
     const commands = registry.list();
 
@@ -344,7 +344,7 @@ test("15. narrow terminal rendering does not overflow", () => {
     }
 });
 
-test("16. terminal input parser decodes tab and escape", () => {
+test("terminal input parser decodes tab and escape", () => {
     const events: TerminalInputEvent[] = [];
     const input = createTerminalInput((e) => events.push(e), 0);
 
@@ -359,7 +359,7 @@ test("16. terminal input parser decodes tab and escape", () => {
     ]);
 });
 
-test("17. interactive Tab completes command and hides suggestions", async () => {
+test("interactive Tab completes command and hides suggestions", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -381,7 +381,7 @@ test("17. interactive Tab completes command and hides suggestions", async () => 
     }
 });
 
-test("18. interactive Arrow navigation moves selection highlight", async () => {
+test("interactive Arrow navigation moves selection highlight", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -403,7 +403,7 @@ test("18. interactive Arrow navigation moves selection highlight", async () => {
     }
 });
 
-test("19. typing '/', navigating with ArrowDown and pressing Enter executes the selected command without 'unknown command' error", async () => {
+test("typing '/', navigating with ArrowDown and pressing Enter executes the selected command without 'unknown command' error", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -433,7 +433,7 @@ test("19. typing '/', navigating with ArrowDown and pressing Enter executes the 
     }
 });
 
-test("20. typing '/', navigating to a command expecting arguments and pressing Enter completes the prompt draft", async () => {
+test("typing '/', navigating to a command expecting arguments and pressing Enter completes the prompt draft", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -465,7 +465,7 @@ test("20. typing '/', navigating to a command expecting arguments and pressing E
     }
 });
 
-test("21. Ctrl+A triggers copy of response to clipboard with notice", async () => {
+test("Ctrl+A triggers copy of response to clipboard with notice", async () => {
     const terminal = mount(80, 24);
 
     try {
@@ -486,7 +486,7 @@ test("21. Ctrl+A triggers copy of response to clipboard with notice", async () =
     }
 });
 
-test("22. enterTerminal does not emit mouse tracking codes ?1000h or ?1002h, preserving native mouse selection", () => {
+test("enterTerminal does not emit mouse tracking codes ?1000h or ?1002h, preserving native mouse selection", () => {
     const input = Object.assign(new PassThrough(), {
         isTTY: true,
         isRaw: false,

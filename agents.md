@@ -10,6 +10,7 @@
 - Match the existing codebase’s spacing, indentation, line breaks, and surrounding formatting style; do not introduce a new formatting pattern when nearby code already establishes one.
 - Read `ARCHITECTURE.md` to get an idea of what we are building before any change
 - Always use `npm` as the package manager for running scripts and managing dependencies (do not use pnpm, yarn, or bun).
+- For changes affecting interactive TUI behavior, run the PTY E2E suite (`npm run test:tui`) in addition to normal unit/type/format verification.
 
 ## Repository Structure
 

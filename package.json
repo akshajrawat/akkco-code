@@ -13,8 +13,9 @@
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "typecheck": "tsc --noEmit",
-        "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/**/*.test.ts\"",
-        "verify": "npm run format:check && npm run typecheck && npm test",
+        "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/*.test.ts\"",
+        "test:tui": "tsx --test \"apps/cli/test/pty/**/*.test.ts\"",
+        "verify": "npm run format:check && npm run typecheck && npm test && npm run test:tui",
         "prepare": "husky"
     },
     "lint-staged": {
