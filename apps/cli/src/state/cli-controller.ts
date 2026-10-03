@@ -1,14 +1,22 @@
 import { createAkkcoRuntime, Session } from "@akkco/core";
 import type { ModelProvider } from "@akkco/models";
 import { toModelTools, type ToolRegistry } from "@akkco/tools";
+import {
+    type CommandContext,
+    type CommandMetadata,
+    type CommandRegistry,
+    createBuiltinCommandRegistry,
+} from "../commands/command-registry.js";
 import type { CliPresentationEvent, CliViewState, HistoryItem } from "./types.js";
 
 export const createCliController = ({
     provider,
     toolRegistry,
+    commandRegistry = createBuiltinCommandRegistry(),
 }: {
     provider: ModelProvider;
     toolRegistry: ToolRegistry;
+    commandRegistry?: CommandRegistry;
 }) => {
     let state: CliViewState = {
         history: [],
@@ -127,84 +135,40 @@ export const createCliController = ({
         }
     };
 
-    const executeCommand = async (input: string) => {
-        if (input === "/exit") {
-            exit();
-            return true;
-        }
+    const commandContext: CommandContext = {
+        session,
+        toolRegistry,
 
-        if (input === "/clear") {
-            session.clear();
-            update({ history: [], historyVersion: state.historyVersion + 1, outcome: undefined });
-            notice("Conversation cleared.");
-            return true;
-        }
+        appendHistory: (item) => {
+            append({ id: nextId++, ...item } as HistoryItem);
+        },
 
-        if (input === "/tools") {
-            append({
-                id: nextId++,
-                type: "tools",
-                tools: toolRegistry.list().map(({ name, description }) => ({ name, description })),
+        notice,
+        exit,
+
+        clearHistory: () => {
+            update({
+                history: [],
+                historyVersion: state.historyVersion + 1,
+                outcome: undefined,
             });
-            return true;
-        }
+        },
 
-        if (input !== "/tool" && !input.startsWith("/tool ")) {
-            return false;
-        }
+        startTool,
 
-        const args = input.slice(5).trim();
-        if (!args) {
-            notice("Usage: /tool <name> [json]", "error");
-            return true;
-        }
+        finishTool: (execution) => {
+            if (execution.status === "failed") {
+                update({ activeTool: undefined, outcome: "error" });
+            } else {
+                update({ activeTool: undefined });
+            }
 
-        const firstSpace = args.indexOf(" ");
-        const toolName = firstSpace === -1 ? args : args.slice(0, firstSpace);
-        const rawJson = firstSpace === -1 ? "{}" : args.slice(firstSpace + 1).trim();
-
-        let toolInput: unknown;
-        try {
-            toolInput = JSON.parse(rawJson || "{}");
-        } catch {
-            notice("Error: Invalid JSON input for tool.", "error");
-            return true;
-        }
-
-        startTool(toolName, toolInput);
-        const started = Date.now();
-
-        try {
-            const result = await toolRegistry.execute(toolName, toolInput);
-            update({ activeTool: undefined });
             append({
                 id: nextId++,
                 type: "tool",
-                execution: {
-                    toolName,
-                    arguments: toolInput,
-                    status: "completed",
-                    durationMs: Date.now() - started,
-                    result: result.content,
-                    showResult: true,
-                },
+                execution,
             });
-        } catch (error) {
-            update({ activeTool: undefined, outcome: "error" });
-            append({
-                id: nextId++,
-                type: "tool",
-                execution: {
-                    toolName,
-                    arguments: toolInput,
-                    status: "failed",
-                    durationMs: Date.now() - started,
-                    error: error instanceof Error ? error.message : String(error),
-                },
-            });
-        }
-
-        return true;
+        },
     };
 
     const submit = async (input: string) => {
@@ -221,7 +185,7 @@ export const createCliController = ({
         update({ status: "generating", outcome: undefined });
 
         try {
-            if (await executeCommand(input.trim())) {
+            if (await commandRegistry.dispatch(input.trim(), commandContext)) {
                 return;
             }
 
@@ -287,6 +251,7 @@ export const createCliController = ({
 
     return {
         getSnapshot: () => state,
+        getCommands: (): readonly CommandMetadata[] => commandRegistry.list(),
 
         subscribe: (subscriber: () => void) => {
             subscribers.add(subscriber);
@@ -307,6 +272,7 @@ export const createCliController = ({
         submit,
         interrupt,
         exit,
+        notice,
 
         dispose: () => {
             activeAbort?.abort();

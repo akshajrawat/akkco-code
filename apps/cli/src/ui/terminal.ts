@@ -1,4 +1,37 @@
+import { spawn } from "node:child_process";
 import process, { stdin, stdout } from "node:process";
+
+export const copyToClipboard = (
+    text: string,
+    output: { write: (chunk: string) => unknown } = stdout,
+) => {
+    if (!text) {
+        return;
+    }
+
+    // 1. OSC 52 sequence for terminal emulators supporting it
+    try {
+        const base64 = Buffer.from(text).toString("base64");
+        output.write(`\x1b]52;c;${base64}\x07\x1b]52;p;${base64}\x07`);
+    } catch {}
+
+    // 2. Desktop clipboard integration (Linux/macOS)
+    if (process.platform === "linux") {
+        try {
+            const tool = process.env.WAYLAND_DISPLAY ? "wl-copy" : "xclip";
+            const args = tool === "wl-copy" ? [] : ["-selection", "clipboard"];
+            const child = spawn(tool, args, { stdio: ["pipe", "ignore", "ignore"] });
+            child.on("error", () => {});
+            child.stdin?.end(text);
+        } catch {}
+    } else if (process.platform === "darwin") {
+        try {
+            const child = spawn("pbcopy", [], { stdio: ["pipe", "ignore", "ignore"] });
+            child.on("error", () => {});
+            child.stdin?.end(text);
+        } catch {}
+    }
+};
 
 export const enterTerminal = (input = stdin, output = stdout) => {
     const wasRaw = Boolean(input.isRaw);
@@ -32,10 +65,10 @@ export const enterTerminal = (input = stdin, output = stdout) => {
     process.once("exit", restore);
     process.once("uncaughtExceptionMonitor", restore);
 
-    // Enter alternate screen, home cursor, hide cursor, bracketed paste, mouse tracking & alternate scroll mode.
-    output.write(
-        "\x1b[?1049h\x1b[H\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h",
-    );
+    // Enter alternate screen, home cursor, hide cursor, bracketed paste & alternate scroll mode.
+    // NOTE: Mouse tracking (?1000h / ?1002h / ?1006h) is intentionally omitted so the terminal
+    // preserves native mouse text selection (click and drag) and clipboard copy.
+    output.write("\x1b[?1049h\x1b[H\x1b[?25l\x1b[?2004h\x1b[?1007h");
 
     return restore;
 };

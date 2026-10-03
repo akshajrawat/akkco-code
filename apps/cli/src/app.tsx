@@ -10,7 +10,7 @@ import type { CliMetadata } from "./state/types.js";
 import { useCliController } from "./state/use-cli-controller.js";
 import { palette } from "./theme/palette.js";
 import { buildConversationLines, calculateLayout, visibleConversation } from "./ui/layout.js";
-import { enterTerminal } from "./ui/terminal.js";
+import { copyToClipboard, enterTerminal } from "./ui/terminal.js";
 
 export const App = ({
     controller,
@@ -78,19 +78,43 @@ export const App = ({
         }
     }, [state.exited, exit]);
 
-    const viewport = visibleConversation(lines, layout.conversationHeight, scrollOffset);
+    const [suggestionsHeight, setSuggestionsHeight] = useState(0);
+
+    const effectiveConversationHeight = Math.max(0, layout.conversationHeight - suggestionsHeight);
+    const effectiveFooterHeight = layout.footerHeight + suggestionsHeight;
+
+    const viewport = visibleConversation(lines, effectiveConversationHeight, scrollOffset);
 
     const scroll = (direction: "up" | "down", linesToScroll?: number) => {
         setScrollOffset((offset) => {
-            const maxOffset = Math.max(0, lines.length - layout.conversationHeight);
+            const maxOffset = Math.max(0, lines.length - effectiveConversationHeight);
 
             if (linesToScroll === Infinity) {
                 return direction === "up" ? maxOffset : 0;
             }
 
-            const delta = linesToScroll ?? Math.max(1, layout.conversationHeight - 1);
+            const delta = linesToScroll ?? Math.max(1, effectiveConversationHeight - 1);
             return Math.max(0, Math.min(maxOffset, offset + (direction === "up" ? delta : -delta)));
         });
+    };
+
+    const handleCopy = (draftText?: string) => {
+        if (draftText && draftText.trim()) {
+            copyToClipboard(draftText, stdout);
+            controller.notice("Copied draft to clipboard.");
+            return;
+        }
+
+        const lastAssistant = [...state.history]
+            .reverse()
+            .find((item) => item.type === "message" && item.role === "assistant");
+
+        if (lastAssistant && lastAssistant.type === "message" && lastAssistant.content) {
+            copyToClipboard(lastAssistant.content, stdout);
+            controller.notice("Copied last response to clipboard.");
+        } else {
+            controller.notice("No response to copy.");
+        }
     };
 
     return (
@@ -99,11 +123,11 @@ export const App = ({
 
             <Conversation
                 lines={viewport.lines}
-                height={layout.conversationHeight}
+                height={effectiveConversationHeight}
                 empty={lines.length === 0}
             />
 
-            <Box flexDirection="column" height={layout.footerHeight} flexShrink={0}>
+            <Box flexDirection="column" height={effectiveFooterHeight} flexShrink={0}>
                 {layout.footerHeight >= 3 && (
                     <Text color={palette.muted}>{"─".repeat(layout.width)}</Text>
                 )}
@@ -113,12 +137,15 @@ export const App = ({
                         disabled={state.status !== "idle" || state.exited}
                         columns={layout.width}
                         rows={layout.promptRows}
+                        commands={controller.getCommands?.() ?? []}
+                        onSuggestionsHeightChange={setSuggestionsHeight}
                         onSubmit={async (value) => {
                             setScrollOffset(0);
                             await controller.submit(value);
                         }}
                         onInterrupt={controller.interrupt}
                         onScroll={scroll}
+                        onCopy={handleCopy}
                     />
 
                     {layout.footerHeight >= 2 && (

@@ -83,7 +83,14 @@ In compatibility mode, the wrapper intercepts requests before invoking the wrapp
 
 `apps/cli/src/index.ts` validates `AKKCO_TOOL_MODE`, constructs the provider and repository tool registry, reads the CLI version using `node:fs/promises`, and initializes the CLI controller. `AKKCO_BASE_URL`, `AKKCO_MODEL`, and `AKKCO_API_KEY` retain their existing defaults and behavior. The domain packages have no Ink or React dependency.
 
-The controller in `state/cli-controller.ts` owns a `Session`, command dispatch, an active generation's `AbortController`, and CLI presentation state. Its tool-host wrapper reports running-tool state before executing the existing registry; unchanged `RuntimeEvent` outcomes complete the presentation. Assistant segments are committed before tool outcomes. React subscribes through `use-cli-controller.ts`, while the plain renderer consumes incremental presentation events. Cancellation and error outcomes belong only to UI state.
+The controller in `state/cli-controller.ts` coordinates a `Session`, the command subsystem, an active generation's `AbortController`, and CLI presentation state. Slash-command handling is factored out into a dedicated subsystem under `commands/`:
+
+- `commands/command-registry.ts`: defines `CliCommand`, `CommandContext`, and `CommandRegistry` (`createBuiltinCommandRegistry`). It parses slash inputs, extracts the command name and arguments, and dispatches them. Inputs starting with `/` that do not match a known command emit an "Unknown command" notice and are never forwarded to the model; inputs without a leading `/` are passed to `Session.send()`.
+- `commands/session-commands.ts`: houses the `/exit` and `/clear` command handlers.
+- `commands/tool-commands.ts`: houses `/tools` and manual `/tool <name> [json]` invocation.
+- `CommandContext`: exposes a minimal capability boundary (`session`, `tools`, `appendHistory`, `notice`, `exit`, `startToolExecution`, `finishToolExecution`, `isCancelled`) so commands cannot directly mutate arbitrary controller state.
+
+Its tool-host wrapper reports running-tool state before executing the existing registry; unchanged `RuntimeEvent` outcomes complete the presentation. Assistant segments are committed before tool outcomes. React subscribes through `use-cli-controller.ts`, while the plain renderer consumes incremental presentation events. Cancellation and error outcomes belong only to UI state.
 
 ### Interactive terminal
 
@@ -95,7 +102,9 @@ When stdin and stdout are TTYs, raw input is supported, and `TERM` is not `dumb`
 
 Automatic tool events show concise path/query arguments, running/completed/failed/cancelled status, and available duration. Search results show a match count. Automatic file/tool result contents remain inside the agent context rather than being printed. The explicit `/tool <name> [json]` command continues to display its requested result.
 
-`components/PromptInput.tsx` owns a bounded multiline draft and cursor editing. `ui/terminal-input.ts` decodes navigation, mouse wheel scrolls, and buffers bracketed paste across arbitrary stream chunks. Pasted newlines remain in one draft and never trigger submissions; a separate Enter submits the complete draft. Unbracketed multiline input delivered in one chunk is also treated as a paste. Arrow keys, Home/End, backspace, Delete, Ctrl+A/E/U, PageUp/PageDown, and mouse wheel events are handled in the CLI layer. The prompt remains fixed while output streams.
+`components/PromptInput.tsx` owns a bounded multiline draft, cursor editing, and slash-command autocomplete integration. When a draft begins with `/`, `ui/command-suggestions.ts` extracts the in-progress command prefix and filters registered commands from the `CommandRegistry` (via `controller.getCommands()`). `components/CommandSuggestions.tsx` renders a bounded suggestion panel immediately above the prompt with responsive columns (name, description, and usage when width permits). While suggestions are visible, `ArrowUp`/`ArrowDown` cycle through candidates with wrapping, `Tab` completes the command name (adding trailing whitespace for commands requiring arguments), and `Escape` dismisses the palette for the current draft. The conversation viewport height dynamically shrinks by the suggestion panel height, preserving the terminal's overall row layout.
+
+`ui/terminal-input.ts` decodes navigation, mouse wheel scrolls, Tab, Escape, and buffers bracketed paste across arbitrary stream chunks. Pasted newlines remain in one draft and never trigger submissions; a separate Enter submits the complete draft. Unbracketed multiline input delivered in one chunk is also treated as a paste. Arrow keys, Home/End, backspace, Delete, Ctrl+A/E/U, PageUp/PageDown, and mouse wheel events are handled in the CLI layer. The prompt remains fixed while output streams.
 
 Keyboard Ctrl+C and process SIGINT use the controller's interrupt handler. Active generation is aborted and preserves partial text with one cancellation notice; an idle interrupt exits cleanly. The status bar displays Idle, Thinking, Running tool, Cancelled, or Error. Ink's automatic Ctrl+C exit is disabled. `/exit`, SIGTERM/SIGHUP, normal shutdown, and handled UI failures restore raw mode, cursor visibility, bracketed-paste mode, and the previous shell screen. Uncatchable termination such as SIGKILL cannot run restoration.
 

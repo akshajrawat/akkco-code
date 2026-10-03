@@ -15,7 +15,10 @@ export type TerminalInputEvent =
               | "end"
               | "clear"
               | "pageUp"
-              | "pageDown";
+              | "pageDown"
+              | "tab"
+              | "escape"
+              | "copy";
       }
     | {
           type: "scroll";
@@ -62,10 +65,12 @@ const sequences: Record<string, Extract<TerminalInputEvent, { type: "key" }>["ke
     "\x1b[3~": "delete",
     "\r": "enter",
     "\n": "enter",
+    "\t": "tab",
+    "\x1b[Z": "tab",
     "\x03": "interrupt",
     "\x7f": "backspace",
     "\b": "backspace",
-    "\x01": "home",
+    "\x01": "copy",
     "\x05": "end",
     "\x15": "clear",
 };
@@ -75,11 +80,24 @@ const sortedSequenceKeys = Object.keys(sequences).sort((a, b) => b.length - a.le
 export const cleanPaste = (text: string) =>
     text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
 
-export const createTerminalInput = (onEvent: (event: TerminalInputEvent) => void) => {
+export const createTerminalInput = (
+    onEvent: (event: TerminalInputEvent) => void,
+    escapeTimeoutMs = 30,
+) => {
     let buffer = "";
     let pasting = false;
+    let escapeTimer: NodeJS.Timeout | undefined;
+
+    const clearEscapeTimer = () => {
+        if (escapeTimer) {
+            clearTimeout(escapeTimer);
+            escapeTimer = undefined;
+        }
+    };
 
     return (chunk: string) => {
+        clearEscapeTimer();
+
         // Unbracketed multiline input in one chunk is also a draft, never multiple turns.
         if (
             !pasting &&
@@ -153,6 +171,23 @@ export const createTerminalInput = (onEvent: (event: TerminalInputEvent) => void
                 onEvent({ type: "key", key: sequences[sequence]! });
                 buffer = buffer.slice(sequence.length);
                 continue;
+            }
+
+            if (buffer === "\x1b") {
+                if (escapeTimeoutMs <= 0) {
+                    buffer = "";
+                    onEvent({ type: "key", key: "escape" });
+                    continue;
+                }
+
+                escapeTimer = setTimeout(() => {
+                    if (buffer === "\x1b") {
+                        buffer = "";
+                        onEvent({ type: "key", key: "escape" });
+                    }
+                }, escapeTimeoutMs);
+                escapeTimer.unref?.();
+                return;
             }
 
             if ([pasteStart, ...sortedSequenceKeys].some((key) => key.startsWith(buffer))) {

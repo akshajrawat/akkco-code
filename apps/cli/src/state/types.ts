@@ -13,29 +13,27 @@ export type ToolExecutionState = Omit<RuntimeToolExecutionEvent, "type" | "callI
     showResult?: boolean;
 };
 
-export type HistoryItem =
+export type HistoryItemPayload =
     | {
-          id: number;
           type: "message";
           role: "user" | "assistant";
           content: string;
       }
     | {
-          id: number;
           type: "tool";
           execution: ToolExecutionState;
       }
     | {
-          id: number;
           type: "notice";
           kind: "info" | "error" | "warning";
           content: string;
       }
     | {
-          id: number;
           type: "tools";
           tools: { name: string; description: string }[];
       };
+
+export type HistoryItem = HistoryItemPayload & { id: number };
 
 export type CliViewState = {
     history: HistoryItem[];
