@@ -3,7 +3,7 @@
 ```
 akkco-code/
 ├── apps/
-│   └── cli/        → terminal entrypoint & command loop
+│   └── cli/        → terminal bootstrap, controller & presentation
 └── packages/
     ├── core/       → Akkco runtime, session, transcript & context compiler
     ├── models/     → provider-neutral model contracts & testing utilities
@@ -11,9 +11,9 @@ akkco-code/
     └── tools/      → tool definition, registry & execution contracts
 ```
 
-1. `apps/cli` : This is the core app that the users see. It contains input/output logic, TUI, cancellation handling (SIGINT / AbortSignal), and interactive commands (`/exit`, `/clear`, `/tools`, `/tool <name> <json>`).
+1. `apps/cli` : This is the app that users see. It owns configuration, input/output, the Ink/React terminal UI, a plain stream renderer for piped usage, cancellation handling (SIGINT / AbortSignal), and interactive commands (`/exit`, `/clear`, `/tools`, `/tool <name> [json]`). All terminal presentation stays inside this application; internal packages have no dependency on Ink or React.
 
-2. `packages/core` : This is the main runtime and session logic (`Session → Runtime`). Organised into `runtime/` (`runtime.ts`, `events.ts`, `tool-host.ts`), `session.ts`, `context/` (`context-compiler.ts`), and `transcript/` (`types.ts`). `Session` exclusively owns the conversation transcript (`TranscriptItem[]`) as its internal source of truth. Before each request, `compileContext(transcript)` compiles the transcript into provider-neutral `ModelItem[]` for `Runtime`. `Runtime` coordinates the automatic model → tool → model agent loop across multiple turns using `RuntimeToolHost` (decoupled from tools/registry internals), yielding `RuntimeEvent` (`RuntimeTextEvent`, `RuntimeToolExecutionEvent`) with loop protection (`maxToolIterations`). `Session` records user turns, assistant pre-tool text, tool executions (`status: "completed" | "failed"`), and final assistant segments, maintaining strict chronological isolation and in-flight locks.
+2. `packages/core` : This is the main runtime and session logic (`Session → Runtime`). Organised into `runtime/` (`runtime.ts`, `events.ts`, `tool-host.ts`), `session.ts`, `context/` (`context-compiler.ts`), and `transcript/` (`types.ts`). `Session` exclusively owns the conversation transcript (`TranscriptItem[]`) as its internal source of truth. Before each request, `compileContext(transcript)` compiles the transcript into provider-neutral `ModelItem[]` for `Runtime`. `Runtime` coordinates the automatic model → tool → model agent loop across multiple turns using `RuntimeToolHost` (decoupled from tools/registry internals), yielding `RuntimeEvent` (`RuntimeTextEvent`, `RuntimeToolExecutionEvent`) with optional loop protection (`maxToolIterations`). By default, tool iterations have no artificial limit, allowing infinite/unconstrained agent turns while supporting configurable finite limits. `Session` records user turns, assistant pre-tool text, tool executions (`status: "completed" | "failed"`), and final assistant segments, maintaining strict chronological isolation and in-flight locks.
 
 3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest` (`items`, `tools`, `signal`), and discriminated `ModelEvent` union (`ModelTextEvent`, `ModelToolCallEvent`).
 
@@ -79,9 +79,34 @@ In compatibility mode, the wrapper intercepts requests before invoking the wrapp
 - Buffers and validates exact `<akkco_tool_call>` envelopes and emits standard `ModelToolCallEvent`s to Runtime.
 - Runtime remains completely provider-neutral and unaware whether events originated natively or via compatibility.
 
+## Terminal UI
+
+`apps/cli/src/index.ts` validates `AKKCO_TOOL_MODE`, constructs the provider and repository tool registry, reads the CLI version using `node:fs/promises`, and initializes the CLI controller. `AKKCO_BASE_URL`, `AKKCO_MODEL`, and `AKKCO_API_KEY` retain their existing defaults and behavior. The domain packages have no Ink or React dependency.
+
+The controller in `state/cli-controller.ts` owns a `Session`, command dispatch, an active generation's `AbortController`, and CLI presentation state. Its tool-host wrapper reports running-tool state before executing the existing registry; unchanged `RuntimeEvent` outcomes complete the presentation. Assistant segments are committed before tool outcomes. React subscribes through `use-cli-controller.ts`, while the plain renderer consumes incremental presentation events. Cancellation and error outcomes belong only to UI state.
+
+### Interactive terminal
+
+When stdin and stdout are TTYs, raw input is supported, and `TERM` is not `dumb`, `app.tsx` mounts the Ink/React application. `ui/terminal.ts` enters the alternate screen, enables bracketed paste, and enables mouse tracking (SGR & X10) and alternate scroll mode. The application uses the terminal width and height, reserving one bottom row for Ink's trailing newline to avoid terminal scrolling. No background color is painted.
+
+`ui/layout.ts` computes a fixed header, expanding conversation viewport, and fixed prompt/status footer. A centered three-row cyan/blue pixel wordmark appears on terminals at least 52 columns wide with 20 usable rows. Narrow or short terminals use a centered text title and reduce metadata or hide the header to preserve the prompt. The current model, tool mode, provider, version, and home-relative directory appear where space permits. Resize events recompute layout and text wrapping.
+
+`components/Conversation.tsx` renders only the visible wrapped conversation lines, replacing the former Ink `Static` scrollback approach. The viewport shows user and assistant labels, streaming text, tool executions, errors, cancellation, and notices. New output follows the latest content by default. PageUp/PageDown, Shift+PageUp/Down, Up/Down arrow navigation (at empty prompt or prompt boundaries), and mouse wheel trackpad scrolling navigate retained in-memory history; while scrolled up, incoming lines preserve the reader's position. Submitting a new prompt or returning to the bottom resumes following new output. `/clear` resets the session, UI history, and scroll position.
+
+Automatic tool events show concise path/query arguments, running/completed/failed/cancelled status, and available duration. Search results show a match count. Automatic file/tool result contents remain inside the agent context rather than being printed. The explicit `/tool <name> [json]` command continues to display its requested result.
+
+`components/PromptInput.tsx` owns a bounded multiline draft and cursor editing. `ui/terminal-input.ts` decodes navigation, mouse wheel scrolls, and buffers bracketed paste across arbitrary stream chunks. Pasted newlines remain in one draft and never trigger submissions; a separate Enter submits the complete draft. Unbracketed multiline input delivered in one chunk is also treated as a paste. Arrow keys, Home/End, backspace, Delete, Ctrl+A/E/U, PageUp/PageDown, and mouse wheel events are handled in the CLI layer. The prompt remains fixed while output streams.
+
+Keyboard Ctrl+C and process SIGINT use the controller's interrupt handler. Active generation is aborted and preserves partial text with one cancellation notice; an idle interrupt exits cleanly. The status bar displays Idle, Thinking, Running tool, Cancelled, or Error. Ink's automatic Ctrl+C exit is disabled. `/exit`, SIGTERM/SIGHUP, normal shutdown, and handled UI failures restore raw mode, cursor visibility, bracketed-paste mode, and the previous shell screen. Uncatchable termination such as SIGKILL cannot run restoration.
+
+### Piped usage
+
+If either standard stream is non-TTY, or `TERM=dumb`, `plain-cli.ts` uses buffered readline input and ordinary stream writes. It queues lines while a turn runs and drains the last line at EOF. This preserves incremental assistant output, commands, explicit tool results, and stderr errors without styling, cursor controls, or raw mode, even when `FORCE_COLOR` is set. `/exit` discards subsequent queued lines; EOF drains pending turns without a farewell.
+
 ## Development Guardrails
 
 - Formatting: Automated with Prettier matching repository standards (`printWidth: 100`, `tabWidth: 4`, double quotes, semicolons, trailing commas).
 - Git Hooks: Managed with Husky and `lint-staged`.
-    - `pre-commit`: Runs Prettier against staged source/config files via `lint-staged`.
+    - `pre-commit`: Runs Prettier against staged source/config files, including `.tsx`, via `lint-staged`.
     - `pre-push`: Runs TypeScript typecheck (`npm run typecheck`) and the full test suite (`npm test`) without mutating files.
+- Verification: `npm run verify` runs formatting checks, TypeScript typechecking (including React JSX), and the full workspace test suite. CLI tests cover piped commands and generation, tool event ordering in both modes, EOF handling, full-screen layout calculations, resize and history scrolling, tool and cancellation states, deliberate multiline-paste submission, and terminal restoration.

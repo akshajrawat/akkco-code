@@ -575,6 +575,53 @@ test("11. maxToolIterations prevents infinite loops", async () => {
     assert.strictEqual(turns, 4);
 });
 
+test("11b. default runtime allows unlimited tool iterations without artificial limit", async () => {
+    let turns = 0;
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turns++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turns <= 10) {
+                        yield {
+                            type: "tool_call",
+                            id: `call_${turns}`,
+                            name: "multi_step_tool",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        yield {
+                            type: "text",
+                            content: "done after 10 tool iterations",
+                        } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async () => ({ content: "step result" }),
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const events: RuntimeEvent[] = [];
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "do 10 steps" }],
+    })) {
+        events.push(event);
+    }
+
+    assert.strictEqual(turns, 11);
+    const lastEvent = events[events.length - 1];
+    assert.strictEqual(lastEvent.type, "text");
+    if (lastEvent.type === "text") {
+        assert.strictEqual(lastEvent.content, "done after 10 tool iterations");
+    }
+});
+
 test("12. runtime without ToolHost still works as existing text chat", async () => {
     let capturedRequest: ModelRequest | undefined;
     const provider: ModelProvider = {

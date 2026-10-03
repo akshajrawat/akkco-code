@@ -6,6 +6,8 @@
 - After every meaningful repo change, update `ARCHITECTURE.md` so it reflects the current methodology, package structure, and architecture.
 - Run the necessary tests, type checks, linters, and other relevant verification after making changes.
 - Dont keep again and again making a function if such function already exist anywhere from where it can be used
+- Only import the thing you want to use
+- Match the existing codebase’s spacing, indentation, line breaks, and surrounding formatting style; do not introduce a new formatting pattern when nearby code already establishes one.
 
 ## Repository Structure
 

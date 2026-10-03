@@ -24,7 +24,7 @@ const throwIfAborted = (signal?: AbortSignal) => {
 export const createAkkcoRuntime = (
     provider: ModelProvider,
     toolHost?: RuntimeToolHost,
-    maxToolIterations = 8,
+    maxToolIterations?: number,
 ) => {
     const run = (request: ModelRequest) => {
         return {
@@ -59,7 +59,11 @@ export const createAkkcoRuntime = (
                     }
 
                     iterations++;
-                    if (iterations > maxToolIterations) {
+                    if (
+                        typeof maxToolIterations === "number" &&
+                        Number.isFinite(maxToolIterations) &&
+                        iterations > maxToolIterations
+                    ) {
                         throw new Error("Maximum tool iterations exceeded");
                     }
 

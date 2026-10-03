@@ -197,3 +197,204 @@ test("CLI accepts AKKCO_TOOL_MODE=compatibility cleanly", async () => {
     assert.match(output, /Akkco Code/);
     assert.match(output, /Goodbye\./);
 });
+
+for (const mode of ["native", "compatibility"]) {
+    test(
+        `CLI displays agent tool executions in chronological order in ${mode} mode`,
+        { timeout: 10000 },
+        async () => {
+            let requests = 0;
+
+            const server = http.createServer((_req, res) => {
+                requests++;
+                res.writeHead(200, { "Content-Type": "text/event-stream" });
+
+                const send = (delta: unknown) =>
+                    res.write(`data: ${JSON.stringify({ choices: [{ delta }] })}\n\n`);
+
+                if (requests === 1) {
+                    if (mode === "native") {
+                        send({ content: "Before tool." });
+                        send({
+                            tool_calls: [
+                                {
+                                    index: 0,
+                                    id: "read-call",
+                                    type: "function",
+                                    function: {
+                                        name: "read_file",
+                                        arguments: '{"path":"apps/cli/package.json"}',
+                                    },
+                                },
+                            ],
+                        });
+                    } else {
+                        send({
+                            content:
+                                '<akkco_tool_call>{"name":"read_file","arguments":{"path":"apps/cli/package.json"}}</akkco_tool_call>',
+                        });
+                    }
+                } else {
+                    send({ content: "After tool." });
+                }
+
+                res.end("data: [DONE]\n\n");
+            });
+
+            await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+            const address = server.address();
+            assert.ok(address && typeof address !== "string");
+
+            const cp = spawn(tsxBin, [cliEntry], {
+                cwd: path.resolve(__dirname, "../../.."),
+                env: {
+                    ...process.env,
+                    AKKCO_TOOL_MODE: mode,
+                    AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+                    FORCE_COLOR: "3",
+                    NO_COLOR: undefined,
+                },
+                stdio: ["pipe", "pipe", "pipe"],
+            });
+
+            let output = "";
+            let errors = "";
+
+            cp.stdout.on("data", (data) => {
+                output += data.toString();
+            });
+
+            cp.stderr.on("data", (data) => {
+                errors += data.toString();
+            });
+
+            try {
+                cp.stdin.end("inspect the CLI\n");
+
+                assert.strictEqual(await waitForExit(cp), 0);
+                assert.strictEqual(requests, 2);
+                assert.strictEqual(errors, "");
+                assert.match(output, /Tool: read_file/);
+                assert.match(output, /args: \{"path":"apps\/cli\/package.json"\}/);
+                assert.match(output, /✔ completed \(\d+ms\)/);
+
+                if (mode === "native") {
+                    assert.ok(output.indexOf("Before tool.") < output.indexOf("Tool: read_file"));
+                    assert.strictEqual(output.split("Before tool.").length - 1, 1);
+                }
+
+                assert.ok(output.indexOf("Tool: read_file") < output.indexOf("After tool."));
+                assert.strictEqual(output.split("After tool.").length - 1, 1);
+                assert.doesNotMatch(output, /\x1b|█|<akkco_tool_call>/);
+            } finally {
+                cp.kill();
+                await new Promise<void>((resolve) => server.close(() => resolve()));
+            }
+        },
+    );
+}
+
+test(
+    "CLI queues piped turns, clears conversation context, and drains the final line before EOF",
+    { timeout: 10000 },
+    async () => {
+        const userTurns: string[][] = [];
+
+        const server = http.createServer((req, res) => {
+            let body = "";
+
+            req.on("data", (data) => {
+                body += data.toString();
+            });
+
+            req.on("end", () => {
+                const request = JSON.parse(body);
+                userTurns.push(
+                    request.messages
+                        .filter((message: { role: string }) => message.role === "user")
+                        .map((message: { content: string }) => message.content),
+                );
+                const number = userTurns.length;
+                res.writeHead(200, { "Content-Type": "text/event-stream" });
+                res.write(
+                    `data: ${JSON.stringify({ choices: [{ delta: { content: `response ${number}` } }] })}\n\n`,
+                );
+                setTimeout(() => res.end("data: [DONE]\n\n"), 30);
+            });
+        });
+
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address();
+        assert.ok(address && typeof address !== "string");
+
+        const cp = spawn(tsxBin, [cliEntry], {
+            env: {
+                ...process.env,
+                AKKCO_TOOL_MODE: "native",
+                AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+            },
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        let output = "";
+
+        cp.stdout.on("data", (data) => {
+            output += data.toString();
+        });
+
+        cp.stderr.on("data", (data) => {
+            output += data.toString();
+        });
+
+        try {
+            cp.stdin.end("first\nsecond\n/clear\nthird");
+
+            assert.strictEqual(await waitForExit(cp), 0);
+            assert.deepStrictEqual(userTurns, [["first"], ["first", "second"], ["third"]]);
+            assert.match(
+                output,
+                /response 1[\s\S]*response 2[\s\S]*Conversation cleared\.[\s\S]*response 3/,
+            );
+            assert.strictEqual(output.split("Akkco Code").length - 1, 1);
+            assert.doesNotMatch(output, /Error:|\x1b|█/);
+        } finally {
+            cp.kill();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    },
+);
+
+test(
+    "CLI exits with empty piped input and ignores queued lines after /exit",
+    { timeout: 10000 },
+    async () => {
+        for (const input of ["", "/tools\n/exit\n/tool unknown_tool {}\n"]) {
+            const cp = spawn(tsxBin, [cliEntry], { stdio: ["pipe", "pipe", "pipe"] });
+
+            let output = "";
+
+            cp.stdout.on("data", (data) => {
+                output += data.toString();
+            });
+
+            cp.stderr.on("data", (data) => {
+                output += data.toString();
+            });
+
+            try {
+                cp.stdin.end(input);
+
+                assert.strictEqual(await waitForExit(cp), 0);
+                assert.match(output, /Akkco Code v0\.0\.1/);
+                assert.doesNotMatch(output, /Unknown tool|\x1b|█/);
+
+                if (input) {
+                    assert.match(output, /Available tools:/);
+                    assert.strictEqual(output.split("Goodbye.").length - 1, 1);
+                }
+            } finally {
+                cp.kill();
+            }
+        }
+    },
+);
