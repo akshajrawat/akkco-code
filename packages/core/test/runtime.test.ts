@@ -562,7 +562,7 @@ test("maxToolIterations prevents infinite loops", async () => {
         execute: async () => ({ content: "repeat" }),
     };
 
-    const runtime = createAkkcoRuntime(provider, toolHost, 3);
+    const runtime = createAkkcoRuntime(provider, toolHost, { maxToolIterations: 3 });
 
     await assert.rejects(async () => {
         for await (const _event of runtime.run({
@@ -575,7 +575,7 @@ test("maxToolIterations prevents infinite loops", async () => {
     assert.strictEqual(turns, 4);
 });
 
-test("default runtime allows unlimited tool iterations without artificial limit", async () => {
+test("normal multi-step workflow with varying arguments proceeds within default limit", async () => {
     let turns = 0;
     const provider: ModelProvider = {
         id: "mock",
@@ -588,7 +588,7 @@ test("default runtime allows unlimited tool iterations without artificial limit"
                             type: "tool_call",
                             id: `call_${turns}`,
                             name: "multi_step_tool",
-                            arguments: {},
+                            arguments: { step: turns },
                         } satisfies ModelEvent;
                     } else {
                         yield {

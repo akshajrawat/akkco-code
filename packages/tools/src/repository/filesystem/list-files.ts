@@ -5,14 +5,20 @@ import type { ToolDefinition } from "../../core/types.js";
 import { resolveRepositoryPath } from "./repository-path.js";
 
 const listFilesInputSchema = z.object({
-    path: z.string().optional(),
+    path: z
+        .string()
+        .optional()
+        .describe(
+            "Directory path to list (expects a directory, not a file). Defaults to repository root.",
+        ),
 });
 
 export const createListFilesTool = (
     repositoryRoot: string,
 ): ToolDefinition<typeof listFilesInputSchema> => ({
     name: "list_files",
-    description: "List immediate files and directories in a repository directory.",
+    description:
+        "List immediate files and directories in a repository directory (expects a directory, not a file).",
     inputSchema: listFilesInputSchema,
     execute: async (input) => {
         const targetPath = input.path ?? ".";

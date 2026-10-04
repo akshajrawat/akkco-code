@@ -19,7 +19,7 @@ test("read_file converts to correct ModelTool description", () => {
     assert.strictEqual(modelTool.name, "read_file");
     assert.strictEqual(
         modelTool.description,
-        "Read the full contents of a file from the repository as UTF-8 text.",
+        "Read the full contents of a file from the repository as UTF-8 text (expects a file, not a directory).",
     );
     assert.strictEqual(modelTool.inputSchema.type, "object");
 
@@ -39,7 +39,7 @@ test("list_files reflects optional path correctly", () => {
     assert.strictEqual(modelTool.name, "list_files");
     assert.strictEqual(
         modelTool.description,
-        "List immediate files and directories in a repository directory.",
+        "List immediate files and directories in a repository directory (expects a directory, not a file).",
     );
     assert.strictEqual(modelTool.inputSchema.type, "object");
 
@@ -60,7 +60,7 @@ test("search_text reflects required query and optional path", () => {
     assert.strictEqual(modelTool.name, "search_text");
     assert.strictEqual(
         modelTool.description,
-        "Search recursively for literal text within files in the repository.",
+        "Search recursively for literal text within files in the repository (path is a search root/directory).",
     );
     assert.strictEqual(modelTool.inputSchema.type, "object");
 

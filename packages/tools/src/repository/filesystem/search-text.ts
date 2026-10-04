@@ -5,8 +5,16 @@ import type { ToolDefinition } from "../../core/types.js";
 import { isInsideRoot, resolveRepositoryPath } from "./repository-path.js";
 
 const searchTextInputSchema = z.object({
-    query: z.string().min(1, "Query cannot be empty"),
-    path: z.string().optional(),
+    query: z
+        .string()
+        .min(1, "Query cannot be empty")
+        .describe("Literal text string to search for."),
+    path: z
+        .string()
+        .optional()
+        .describe(
+            "Search root or directory path to search recursively within (path is a search root/directory). Defaults to repository root.",
+        ),
 });
 
 const SKIPPED_DIRS = new Set(["node_modules", ".git", "dist", "build"]);
@@ -16,7 +24,8 @@ export const createSearchTextTool = (
     maxMatches = 100,
 ): ToolDefinition<typeof searchTextInputSchema> => ({
     name: "search_text",
-    description: "Search recursively for literal text within files in the repository.",
+    description:
+        "Search recursively for literal text within files in the repository (path is a search root/directory).",
     inputSchema: searchTextInputSchema,
     execute: async (input) => {
         const targetPath = input.path ?? ".";

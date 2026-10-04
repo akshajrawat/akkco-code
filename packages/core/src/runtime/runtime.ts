@@ -8,6 +8,12 @@ import type {
     ModelToolResult,
 } from "@akkco/models";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
+import {
+    AgentLoopError,
+    getToolCallSignature,
+    validateReliabilityOptions,
+    type RuntimeReliabilityOptions,
+} from "./reliability.js";
 import type { RuntimeToolHost } from "./tool-host.js";
 
 const throwIfAborted = (signal?: AbortSignal) => {
@@ -24,13 +30,20 @@ const throwIfAborted = (signal?: AbortSignal) => {
 export const createAkkcoRuntime = (
     provider: ModelProvider,
     toolHost?: RuntimeToolHost,
-    maxToolIterations?: number,
+    reliabilityOptions?: RuntimeReliabilityOptions,
 ) => {
+    const { maxToolIterations, repeatedToolCallLimit, consecutiveToolErrorLimit } =
+        validateReliabilityOptions(reliabilityOptions);
+
     const run = (request: ModelRequest) => {
         return {
             async *[Symbol.asyncIterator](): AsyncGenerator<RuntimeEvent, void, unknown> {
                 const workingItems: ModelItem[] = request.items.map((item) => ({ ...item }));
                 let iterations = 0;
+                let consecutiveToolErrors = 0;
+                let lastSignature: string | undefined;
+                let repetitionCount = 0;
+                let repetitionWarned = false;
 
                 while (true) {
                     throwIfAborted(request.signal);
@@ -59,12 +72,12 @@ export const createAkkcoRuntime = (
                     }
 
                     iterations++;
-                    if (
-                        typeof maxToolIterations === "number" &&
-                        Number.isFinite(maxToolIterations) &&
-                        iterations > maxToolIterations
-                    ) {
-                        throw new Error("Maximum tool iterations exceeded");
+                    if (iterations > maxToolIterations) {
+                        throwIfAborted(request.signal);
+                        throw new AgentLoopError(
+                            "max_tool_iterations",
+                            `Maximum tool iterations exceeded (${maxToolIterations})`,
+                        );
                     }
 
                     if (turnAssistantText.length > 0) {
@@ -89,7 +102,51 @@ export const createAkkcoRuntime = (
                     for (const call of toolCallEvents) {
                         throwIfAborted(request.signal);
 
+                        const signature = getToolCallSignature(call.name, call.arguments);
+
+                        if (signature === lastSignature) {
+                            repetitionCount++;
+
+                            if (repetitionWarned) {
+                                throwIfAborted(request.signal);
+                                throw new AgentLoopError(
+                                    "repeated_tool_call",
+                                    `Agent loop terminated: repeated tool call detected for "${call.name}" with identical arguments without strategy change.`,
+                                );
+                            }
+
+                            if (repetitionCount >= repeatedToolCallLimit) {
+                                repetitionWarned = true;
+                                const warningMessage = `Repeated tool call: action "${call.name}" with identical arguments was called ${repetitionCount} times. You must change your strategy and choose another action or arguments.`;
+
+                                const resultItem: ModelToolResult = {
+                                    type: "tool_result",
+                                    callId: call.id,
+                                    content: warningMessage,
+                                    isError: true,
+                                };
+                                workingItems.push(resultItem);
+
+                                yield {
+                                    type: "tool_execution",
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    error: warningMessage,
+                                    status: "failed",
+                                    durationMs: 0,
+                                } satisfies RuntimeToolExecutionEvent;
+
+                                continue;
+                            }
+                        } else {
+                            lastSignature = signature;
+                            repetitionCount = 1;
+                            repetitionWarned = false;
+                        }
+
                         if (!toolHost) {
+                            consecutiveToolErrors++;
                             const errorMsg = `No tool host available to execute tool: ${call.name}`;
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",
@@ -107,6 +164,14 @@ export const createAkkcoRuntime = (
                                 error: errorMsg,
                                 status: "failed",
                             } satisfies RuntimeToolExecutionEvent;
+
+                            if (consecutiveToolErrors >= consecutiveToolErrorLimit) {
+                                throwIfAborted(request.signal);
+                                throw new AgentLoopError(
+                                    "consecutive_tool_errors",
+                                    `Agent loop terminated: reached consecutive tool error limit of ${consecutiveToolErrorLimit}.`,
+                                );
+                            }
                             continue;
                         }
 
@@ -114,6 +179,8 @@ export const createAkkcoRuntime = (
                         try {
                             const result = await toolHost.execute(call.name, call.arguments);
                             const durationMs = Date.now() - startTime;
+
+                            consecutiveToolErrors = 0;
 
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",
@@ -133,6 +200,8 @@ export const createAkkcoRuntime = (
                             } satisfies RuntimeToolExecutionEvent;
                         } catch (error) {
                             throwIfAborted(request.signal);
+
+                            consecutiveToolErrors++;
 
                             const durationMs = Date.now() - startTime;
                             const errorMessage =
@@ -155,6 +224,14 @@ export const createAkkcoRuntime = (
                                 status: "failed",
                                 durationMs,
                             } satisfies RuntimeToolExecutionEvent;
+
+                            if (consecutiveToolErrors >= consecutiveToolErrorLimit) {
+                                throwIfAborted(request.signal);
+                                throw new AgentLoopError(
+                                    "consecutive_tool_errors",
+                                    `Agent loop terminated: reached consecutive tool error limit of ${consecutiveToolErrorLimit}.`,
+                                );
+                            }
                         }
                     }
 

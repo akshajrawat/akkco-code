@@ -12,6 +12,15 @@
 - Always use `npm` as the package manager for running scripts and managing dependencies (do not use pnpm, yarn, or bun).
 - For changes affecting interactive TUI behavior, run the PTY E2E suite (`npm run test:tui`) in addition to normal unit/type/format verification.
 
+### Public API Hygiene
+
+- Keep package public exports minimal and intentional.
+- Do not export internal helpers, utilities, canonicalizers, serializers, counters, or implementation details from a package `index.ts` unless another package or external consumer genuinely needs them.
+- Prefer exposing stable contracts and domain-level types such as errors, option types, and interfaces rather than internal mechanics.
+- Tests may import internal modules directly when testing implementation-specific behavior; do not widen the production public API only to make tests convenient.
+- Before adding a new export, ask: "Is this part of the package contract, or only an implementation detail?"
+- Removing unnecessary exports is preferred while the project is still pre-stable, before consumers begin depending on them.
+
 ## Repository Structure
 
 - Prefer conceptual grouping over large flat directories.

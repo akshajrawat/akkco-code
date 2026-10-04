@@ -4,6 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseMaxToolIterations } from "../src/state/cli-controller.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.resolve(__dirname, "../src/index.ts");
@@ -395,6 +396,41 @@ test(
             } finally {
                 cp.kill();
             }
+        }
+    },
+);
+
+test("parseMaxToolIterations validates and parses environment variable correctly", () => {
+    assert.strictEqual(parseMaxToolIterations(undefined), undefined);
+    assert.strictEqual(parseMaxToolIterations("25"), 25);
+    assert.strictEqual(parseMaxToolIterations("  10  "), 10);
+    assert.throws(() => parseMaxToolIterations(""), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("0"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("-1"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("abc"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("1.5"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+});
+
+test(
+    "CLI reports clear configuration error on invalid AKKCO_MAX_TOOL_ITERATIONS",
+    { timeout: 10000 },
+    async () => {
+        for (const invalidVal of ["invalid", "-5", "0", "1.5"]) {
+            const cp = spawn(tsxBin, [cliEntry], {
+                env: { ...process.env, AKKCO_MAX_TOOL_ITERATIONS: invalidVal },
+                stdio: ["pipe", "pipe", "pipe"],
+            });
+
+            let output = "";
+            cp.stdout.on("data", (d) => (output += d.toString()));
+            cp.stderr.on("data", (d) => (output += d.toString()));
+
+            cp.stdin.end("");
+
+            const exitCode = await waitForExit(cp);
+            assert.strictEqual(exitCode, 1);
+            assert.match(output, /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+            assert.match(output, /Must be a finite positive integer/);
         }
     },
 );

@@ -4,3 +4,4 @@ export type * from "./transcript/types.js";
 export { compileContext } from "./context/context-compiler.js";
 export type * from "./runtime/events.js";
 export type * from "./runtime/tool-host.js";
+export * from "./runtime/reliability.js";
