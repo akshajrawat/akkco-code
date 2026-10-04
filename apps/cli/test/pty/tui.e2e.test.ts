@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { startTui, type PtyHarness } from "./pty-harness.js";
+import { startTui } from "./pty-harness.js";
 
 test("Startup: starts in interactive mode with prompt and status bar", async () => {
     const tui = await startTui();
@@ -9,6 +9,8 @@ test("Startup: starts in interactive mode with prompt and status bar", async () 
         assert.ok(screen.hasText("Akkco Code"), "Expected header to contain Akkco Code");
         assert.ok(screen.hasText("›"), "Expected prompt symbol to be visible");
         assert.ok(screen.hasText("Idle"), "Expected status bar to show Idle");
+        assert.match(screen.lines().at(-2)!, /Idle/, "Initial status sits at the bottom");
+        assert.equal(tui.terminal.buffer.active.type, "normal");
     } finally {
         await tui.stop();
     }
@@ -29,7 +31,9 @@ test("Slash autocomplete: typing '/' opens palette and filtering narrows command
 
         // Type "to" -> narrows down to /tool and /tools
         await tui.write("to");
-        await tui.waitFor((s) => s.hasText("/tool") && s.hasText("/tools"));
+        await tui.waitFor(
+            (s) => s.hasText("› /to") && !s.lines().some((l) => l.includes("│ /clear")),
+        );
 
         screen = await tui.screen();
         assert.ok(screen.hasText("/tool"));
@@ -185,6 +189,7 @@ test("Resize: adapts terminal layout without crashing or overflowing", async () 
         let screen = await tui.screen();
         assert.ok(screen.hasText("›"));
         assert.ok(screen.maxLineWidth() <= 55, "Lines should not exceed terminal width");
+        assert.match(screen.lines().at(-2)!, /Idle/);
 
         // Resize to wider dimensions
         await tui.resize(100, 30);
@@ -193,41 +198,83 @@ test("Resize: adapts terminal layout without crashing or overflowing", async () 
         screen = await tui.screen();
         assert.ok(screen.hasText("›"));
         assert.ok(screen.maxLineWidth() <= 100, "Lines should not exceed wide terminal width");
+        assert.match(screen.lines().at(-2)!, /Idle/);
     } finally {
         await tui.stop();
     }
 });
 
-test("Scroll: PageUp and PageDown navigate conversation history", async () => {
+test("Completed turns flow into native scrollback without mouse tracking or history duplication", async () => {
     const tui = await startTui({ columns: 80, rows: 24 });
     try {
-        // Generate enough lines to overflow viewport
+        for (const prompt of ["__TEST_LONG__ first", "__TEST_LONG__ second"]) {
+            await tui.write(prompt);
+            await tui.key("enter");
+            await tui.waitFor((s) => s.text().includes("Idle") && s.text().includes("Line 35:"));
+        }
+
+        const screen = await tui.screen();
+        assert.equal(tui.terminal.buffer.active.type, "normal");
+        assert.ok(tui.terminal.buffer.active.baseY > 0, "History must reach native scrollback");
+        assert.ok(screen.scrollbackText().includes("__TEST_LONG__ first"));
+        assert.ok(screen.scrollbackText().includes("__TEST_LONG__ second"));
+        assert.equal(screen.allLines().filter((line) => line.includes("Line 01:")).length, 2);
+        assert.equal(screen.allLines().filter((line) => line.includes("Akkco Code")).length, 1);
+        assert.ok(!screen.text().includes("Line 01:"), "Older lines should be above the viewport");
+
+        const raw = tui.getRecentRawOutput();
+        for (const mode of ["1049", "1007", "1000", "1002", "1006"]) {
+            assert.ok(!raw.includes(`\x1b[?${mode}h`), `Must not enable terminal mode ${mode}`);
+        }
+        assert.ok(!raw.includes("\x1b[3J"), "Rendering must not erase native scrollback");
+    } finally {
+        await tui.stop();
+    }
+});
+
+test("Drafting during streaming supports editing, paste, queueing, and cancellation", async () => {
+    const tui = await startTui();
+    try {
+        await tui.write("__TEST_WAIT__");
+        await tui.key("enter");
+        await tui.waitForText("Starting wait task...");
+        await tui.paste("next draff");
+        await tui.key("backspace");
+        await tui.write("t");
+        await tui.waitFor(
+            (s) => s.text().includes("› next draft") && s.text().includes("Thinking"),
+        );
+        await tui.key("enter");
+        await tui.waitFor((s) => s.text().includes("1 queued"));
+        await tui.write("retained draft");
+        await tui.key("ctrlC");
+        await tui.waitFor(
+            (s) => s.text().includes("Cancelled") && s.text().includes("retained draft"),
+        );
+        const screen = await tui.screen();
+        assert.ok(!screen.text().includes("queued"));
+        assert.ok(!screen.scrollbackText().includes("Hello from Akkco deterministic provider."));
+    } finally {
+        await tui.stop();
+    }
+});
+
+test("Enter during streaming dispatches queued drafts when generation finishes", async () => {
+    const tui = await startTui();
+    try {
         await tui.write("__TEST_LONG__");
         await tui.key("enter");
-
-        await tui.waitForText("Line 35:");
-        await tui.waitForText("Idle");
-
-        // At bottom of viewport, Line 35 is visible, but earlier lines like Line 01 are scrolled off
-        let screen = await tui.screen();
-        assert.ok(screen.hasText("Line 35:"));
-
-        // Scroll up with PageUp
-        await tui.key("pageUp");
-        await tui.waitFor((s) => s.hasText("History ↑") && s.hasText("Line 15:"));
-
-        screen = await tui.screen();
-        assert.ok(
-            screen.hasText("History ↑"),
-            "PageUp should scroll up and show history indicator in status bar",
+        await tui.waitFor((s) => s.text().includes("Thinking"));
+        await tui.paste("automatically queued follow-up");
+        await tui.key("enter");
+        await tui.waitFor(
+            (s) =>
+                s.text().includes("Idle") &&
+                s.scrollbackText().includes("Hello from Akkco deterministic provider."),
         );
-
-        // Scroll back down with PageDown
-        await tui.key("pageDown");
-        await tui.waitFor((s) => s.hasText("Line 35:") && !s.hasText("History ↑"));
-
-        screen = await tui.screen();
-        assert.ok(screen.hasText("Line 35:"), "PageDown should return towards bottom");
+        const screen = await tui.screen();
+        assert.ok(screen.scrollbackText().includes("Line 35:"));
+        assert.ok(screen.scrollbackText().includes("automatically queued follow-up"));
     } finally {
         await tui.stop();
     }
@@ -273,3 +320,167 @@ test("Model tool loop: invokes tool and displays completed outcome", async () =>
         await tui.stop();
     }
 });
+
+test("Short terminal autocomplete preserves native scrollback", async () => {
+    const tui = await startTui();
+    try {
+        await tui.write("__TEST_LONG__");
+        await tui.key("enter");
+        await tui.waitFor((s) => s.text().includes("Idle") && s.text().includes("Line 35:"));
+        await tui.resize(80, 8);
+        await tui.write("/");
+        await tui.waitFor((s) => s.text().includes("Commands"));
+        let screen = await tui.screen();
+        assert.ok(screen.scrollbackText().includes("Line 01:"));
+        await tui.resize(80, 3);
+        await tui.waitFor((s) => s.text().includes("› /"));
+        screen = await tui.screen();
+        assert.ok(screen.scrollbackText().includes("Line 01:"));
+        assert.ok(!tui.getRecentRawOutput().includes("\x1b[3J"));
+    } finally {
+        await tui.stop();
+    }
+});
+
+test("Composer stays at the bottom after short turns, while drafting, and after clear", async () => {
+    const tui = await startTui({ columns: 120, rows: 32 });
+    try {
+        for (const prompt of ["hi", "hello again"]) {
+            await tui.write(prompt);
+            await tui.key("enter");
+            await tui.waitFor(
+                (s) =>
+                    s.text().includes("Idle") &&
+                    s.hasText("Hello from Akkco deterministic provider."),
+            );
+            const screen = await tui.screen();
+            assert.match(
+                screen.lines().at(-2)!,
+                /Idle/,
+                "Composer must remain docked after a short turn",
+            );
+        }
+        await tui.write("__TEST_WAIT__");
+        await tui.key("enter");
+        await tui.waitForText("Starting wait task...");
+        await tui.write("/");
+        await tui.waitForText("Commands");
+        let screen = await tui.screen();
+        assert.match(
+            screen.lines().at(-2)!,
+            /Thinking/,
+            `Autocomplete must keep the composer docked\n${screen.toString()}`,
+        );
+        await tui.key("ctrlC");
+        await tui.waitFor((s) => s.text().includes("Cancelled"));
+        await tui.write("clear");
+        await tui.key("enter");
+        await tui.waitForText("Conversation cleared.");
+        screen = await tui.screen();
+        assert.match(screen.lines().at(-2)!, /Idle/);
+        assert.equal(
+            screen.allLines().filter((line) => line.includes("Akkco Code v")).length,
+            1,
+            "Clear must not reprint the startup banner",
+        );
+    } finally {
+        await tui.stop();
+    }
+});
+
+test("Growing the terminal keeps the composer at the bottom after history fills the screen", async () => {
+    const tui = await startTui();
+    try {
+        await tui.write("__TEST_LONG__");
+        await tui.key("enter");
+        await tui.waitFor((s) => s.text().includes("Idle") && s.text().includes("Line 35:"));
+        await tui.resize(55, 20);
+        await tui.waitFor((s) => s.text().includes("Idle"));
+        assert.match((await tui.screen()).lines().at(-2)!, /Idle/);
+        await tui.resize(100, 40);
+        await tui.waitFor((s) => s.text().includes("Idle"));
+        const screen = await tui.screen();
+        assert.match(screen.lines().at(-2)!, /Idle/);
+        assert.equal(screen.allLines().filter((line) => line.includes("Akkco Code v")).length, 1);
+        assert.ok(!tui.getRecentRawOutput().includes("\x1b[3J"));
+    } finally {
+        await tui.stop();
+    }
+});
+
+test("Opening autocomplete over a full live response never replays the banner or erases scrollback", async () => {
+    const tui = await startTui();
+    try {
+        await tui.write("__TEST_LONG_WAIT__");
+        await tui.key("enter");
+        await tui.waitFor((s) => s.text().includes("Live line 35"));
+        await tui.write("/");
+        await tui.waitFor((s) => s.text().includes("Commands") && s.text().includes("Thinking"));
+        let screen = await tui.screen();
+        assert.match(screen.lines().at(-2)!, /Thinking/);
+        assert.equal(screen.allLines().filter((line) => line.includes("Akkco Code v")).length, 1);
+        assert.ok(!tui.getRecentRawOutput().includes("\x1b[3J"));
+        await tui.write("\x15");
+        await tui.waitFor((s) => !s.text().includes("Commands"));
+        screen = await tui.screen();
+        assert.match(screen.lines().at(-2)!, /Thinking/);
+        await tui.key("ctrlC");
+        await tui.waitFor((s) => s.text().includes("Cancelled"));
+        screen = await tui.screen();
+        assert.match(screen.lines().at(-2)!, /Cancelled/);
+        assert.equal(screen.allLines().filter((line) => line.includes("Akkco Code v")).length, 1);
+        assert.equal(screen.allLines().filter((line) => line.trim() === "Live line 1").length, 1);
+    } finally {
+        await tui.stop();
+    }
+});
+
+for (const [columns, rows] of [
+    [80, 24],
+    [120, 40],
+]) {
+    test(`Live replies flow below the user message with free space beneath them at ${columns}×${rows}`, async () => {
+        const tui = await startTui({ columns, rows });
+        try {
+            await tui.write("__TEST_WAIT__");
+            await tui.key("enter");
+            await tui.waitFor((s) => s.text().includes("Starting wait task..."));
+            let screen = await tui.screen();
+            const userRow = screen.lines().findIndex((line) => line.trim() === "__TEST_WAIT__");
+            const responseRow = screen
+                .lines()
+                .findIndex((line) => line.trim() === "Starting wait task...");
+            assert.ok(userRow >= 0);
+            assert.equal(
+                responseRow,
+                userRow + 3,
+                "Live reply must follow the user message without a large gap",
+            );
+            assert.equal(screen.lines()[userRow + 2]?.trim(), "Akkco");
+            assert.ok(
+                screen
+                    .lines()
+                    .slice(responseRow + 1, rows - 6)
+                    .every((line) => line.trim() === ""),
+                "Unused space belongs beneath the reply",
+            );
+            assert.match(screen.lines().at(-2)!, /Thinking/);
+            await tui.write("draft during generation");
+            await tui.waitFor((s) => s.text().includes("› draft during generation"));
+            screen = await tui.screen();
+            assert.equal(screen.lines()[responseRow]?.trim(), "Starting wait task...");
+            assert.match(screen.lines().at(-2)!, /Thinking/);
+            await tui.key("ctrlC");
+            await tui.waitFor((s) => s.text().includes("Cancelled"));
+            screen = await tui.screen();
+            assert.equal(
+                screen.lines()[responseRow]?.trim(),
+                "Starting wait task...",
+                "Committing the reply must not move it from the bottom to the top",
+            );
+            assert.match(screen.lines().at(-2)!, /Cancelled/);
+        } finally {
+            await tui.stop();
+        }
+    });
+}

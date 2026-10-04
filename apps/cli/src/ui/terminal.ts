@@ -52,10 +52,8 @@ export const enterTerminal = (input = stdin, output = stdout) => {
             input.pause();
             input.unref?.();
 
-            // Disable mouse tracking, alternate scroll, bracketed paste, reset styling, show cursor, restore shell screen.
-            output.write(
-                "\x1b[?1007l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0m\x1b[?25h\x1b[?1049l",
-            );
+            // Disable bracketed paste, reset styling, and restore cursor visibility.
+            output.write("\x1b[?2004l\x1b[0m\x1b[?25h");
 
             process.off("exit", restore);
             process.off("uncaughtExceptionMonitor", restore);
@@ -65,10 +63,10 @@ export const enterTerminal = (input = stdin, output = stdout) => {
     process.once("exit", restore);
     process.once("uncaughtExceptionMonitor", restore);
 
-    // Enter alternate screen, home cursor, hide cursor, bracketed paste & alternate scroll mode.
+    // Clear the launch command from view while retaining the normal scrollback buffer.
     // NOTE: Mouse tracking (?1000h / ?1002h / ?1006h) is intentionally omitted so the terminal
     // preserves native mouse text selection (click and drag) and clipboard copy.
-    output.write("\x1b[?1049h\x1b[H\x1b[?25l\x1b[?2004h\x1b[?1007h");
+    output.write("\x1b[2J\x1b[H\x1b[?25l\x1b[?2004h");
 
     return restore;
 };

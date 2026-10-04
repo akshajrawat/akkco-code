@@ -4,7 +4,6 @@ import type { CommandMetadata } from "../commands/command-registry.js";
 import { palette } from "../theme/palette.js";
 import {
     applyCompletion,
-    calculateSuggestionsHeight,
     commandExpectsArguments,
     filterCommands,
     getCommandPrefix,
@@ -19,21 +18,25 @@ export const PromptInput = ({
     columns,
     rows,
     commands = [],
+    compact = false,
+    maxSuggestionsVisible = 5,
     onSubmit,
     onInterrupt,
     onScroll,
     onCopy,
-    onSuggestionsHeightChange,
+    onSuggestionsCountChange,
 }: {
     disabled: boolean;
     columns: number;
     rows: number;
     commands?: readonly CommandMetadata[];
+    compact?: boolean;
+    maxSuggestionsVisible?: number;
     onSubmit: (input: string) => Promise<void>;
     onInterrupt: () => void;
-    onScroll: (direction: "up" | "down", lines?: number) => void;
+    onScroll?: (direction: "up" | "down", lines?: number) => void;
     onCopy?: (draftText?: string) => void;
-    onSuggestionsHeightChange?: (height: number) => void;
+    onSuggestionsCountChange?: (count: number) => void;
 }) => {
     const { stdin, setRawMode } = useStdin();
     const draft = useRef({ characters: [] as string[], cursor: 0 });
@@ -41,10 +44,38 @@ export const PromptInput = ({
     const currentCommands = useRef(commands);
     currentCommands.current = commands;
 
-    const actions = useRef({ disabled, onSubmit, onInterrupt, onScroll, onCopy });
-    actions.current = { disabled, onSubmit, onInterrupt, onScroll, onCopy };
+    const actions = useRef({
+        disabled,
+        onSubmit,
+        onInterrupt,
+        onScroll,
+        onCopy,
+        maxSuggestionsVisible,
+        onSuggestionsCountChange,
+    });
+    actions.current = {
+        disabled,
+        onSubmit,
+        onInterrupt,
+        onScroll,
+        onCopy,
+        maxSuggestionsVisible,
+        onSuggestionsCountChange,
+    };
 
-    const [, redraw] = useState(0);
+    const [, setRevision] = useState(0);
+    const redraw = () => {
+        const { characters, cursor } = draft.current;
+        const prefix = getCommandPrefix(characters.join(""), cursor);
+        const callbacks = actions.current;
+        const count =
+            !callbacks.disabled && !autocomplete.current.dismissed && prefix !== null
+                ? filterCommands(currentCommands.current, prefix).length
+                : 0;
+        // Notify before rendering: the parent must reserve the popup's rows in the same frame.
+        callbacks.onSuggestionsCountChange?.(count);
+        setRevision((value) => value + 1);
+    };
 
     // Compute suggestion state for rendering and layout notification
     const currentText = draft.current.characters.join("");
@@ -52,7 +83,10 @@ export const PromptInput = ({
     const prefix = getCommandPrefix(currentText, currentCursor);
     const matchingCommands = prefix !== null ? filterCommands(commands, prefix) : [];
     const showSuggestions =
-        !disabled && !autocomplete.current.dismissed && matchingCommands.length > 0;
+        !disabled &&
+        maxSuggestionsVisible > 0 &&
+        !autocomplete.current.dismissed &&
+        matchingCommands.length > 0;
 
     if (
         matchingCommands.length > 0 &&
@@ -61,19 +95,18 @@ export const PromptInput = ({
         autocomplete.current.selectedIndex = 0;
     }
 
-    const suggestionsHeight = showSuggestions
-        ? calculateSuggestionsHeight(matchingCommands.length, 5)
-        : 0;
+    const suggestionCount =
+        !disabled && !autocomplete.current.dismissed ? matchingCommands.length : 0;
 
     useLayoutEffect(() => {
-        onSuggestionsHeightChange?.(suggestionsHeight);
-    }, [suggestionsHeight, onSuggestionsHeightChange]);
+        onSuggestionsCountChange?.(suggestionCount);
+    }, [suggestionCount, onSuggestionsCountChange]);
 
     useEffect(() => {
         return () => {
-            onSuggestionsHeightChange?.(0);
+            onSuggestionsCountChange?.(0);
         };
-    }, [onSuggestionsHeightChange]);
+    }, [onSuggestionsCountChange]);
 
     useLayoutEffect(() => {
         const parse = createTerminalInput((event) => {
@@ -86,18 +119,18 @@ export const PromptInput = ({
             }
 
             if (event.type === "scroll") {
-                callbacks.onScroll(event.direction, event.lines);
+                callbacks.onScroll?.(event.direction, event.lines);
                 return;
             }
 
             if (event.type === "key" && (event.key === "pageUp" || event.key === "pageDown")) {
-                callbacks.onScroll(event.key === "pageUp" ? "up" : "down");
+                callbacks.onScroll?.(event.key === "pageUp" ? "up" : "down");
                 return;
             }
 
             if (callbacks.disabled) {
                 if (event.type === "key" && (event.key === "up" || event.key === "down")) {
-                    callbacks.onScroll(event.key === "up" ? "up" : "down", 1);
+                    callbacks.onScroll?.(event.key === "up" ? "up" : "down", 1);
                 }
                 return;
             }
@@ -108,7 +141,10 @@ export const PromptInput = ({
             const activePrefix = getCommandPrefix(activeText, activeCursor);
             const activeMatches =
                 activePrefix !== null ? filterCommands(currentCommands.current, activePrefix) : [];
-            const isSuggestionsOpen = !autocomplete.current.dismissed && activeMatches.length > 0;
+            const isSuggestionsOpen =
+                callbacks.maxSuggestionsVisible > 0 &&
+                !autocomplete.current.dismissed &&
+                activeMatches.length > 0;
 
             if (isSuggestionsOpen) {
                 if (event.type === "key" && event.key === "up") {
@@ -117,7 +153,7 @@ export const PromptInput = ({
                         activeMatches.length,
                         "up",
                     );
-                    redraw((value) => value + 1);
+                    redraw();
                     return;
                 }
 
@@ -127,7 +163,7 @@ export const PromptInput = ({
                         activeMatches.length,
                         "down",
                     );
-                    redraw((value) => value + 1);
+                    redraw();
                     return;
                 }
 
@@ -138,7 +174,7 @@ export const PromptInput = ({
                         current.characters = Array.from(completed.text);
                         current.cursor = completed.cursor;
                         autocomplete.current.selectedIndex = 0;
-                        redraw((value) => value + 1);
+                        redraw();
                     }
                     return;
                 }
@@ -151,7 +187,7 @@ export const PromptInput = ({
                             current.characters = Array.from(completed.text);
                             current.cursor = completed.cursor;
                             autocomplete.current.selectedIndex = 0;
-                            redraw((value) => value + 1);
+                            redraw();
                             return;
                         }
 
@@ -160,13 +196,14 @@ export const PromptInput = ({
                         autocomplete.current.dismissed = false;
                         autocomplete.current.selectedIndex = 0;
                         void callbacks.onSubmit(value);
+                        redraw();
                         return;
                     }
                 }
 
                 if (event.type === "key" && event.key === "escape") {
                     autocomplete.current.dismissed = true;
-                    redraw((value) => value + 1);
+                    redraw();
                     return;
                 }
             } else if (event.type === "key" && (event.key === "tab" || event.key === "escape")) {
@@ -216,21 +253,21 @@ export const PromptInput = ({
 
                 if (event.key === "home") {
                     if (current.characters.length === 0) {
-                        callbacks.onScroll("up", Infinity);
+                        callbacks.onScroll?.("up", Infinity);
                         return;
                     }
 
                     current.cursor = start;
                 } else if (event.key === "end") {
                     if (current.characters.length === 0) {
-                        callbacks.onScroll("down", Infinity);
+                        callbacks.onScroll?.("down", Infinity);
                         return;
                     }
 
                     current.cursor = end;
                 } else if (event.key === "up") {
                     if (current.characters.length === 0) {
-                        callbacks.onScroll("up", 1);
+                        callbacks.onScroll?.("up", 1);
                         return;
                     }
 
@@ -242,12 +279,12 @@ export const PromptInput = ({
                             previousStart + current.cursor - start,
                         );
                     } else {
-                        callbacks.onScroll("up", 1);
+                        callbacks.onScroll?.("up", 1);
                         return;
                     }
                 } else if (event.key === "down") {
                     if (current.characters.length === 0) {
-                        callbacks.onScroll("down", 1);
+                        callbacks.onScroll?.("down", 1);
                         return;
                     }
 
@@ -258,13 +295,13 @@ export const PromptInput = ({
                             end + 1 + current.cursor - start,
                         );
                     } else {
-                        callbacks.onScroll("down", 1);
+                        callbacks.onScroll?.("down", 1);
                         return;
                     }
                 }
             }
 
-            redraw((value) => value + 1);
+            redraw();
         });
 
         const onData = (chunk: string | Buffer) => parse(chunk.toString());
@@ -281,11 +318,11 @@ export const PromptInput = ({
     const lines = promptViewport(
         draft.current.characters,
         draft.current.cursor,
-        Math.max(1, columns - 4),
+        Math.max(1, columns - (compact ? 2 : 6)),
         rows,
     );
 
-    const suggestionsWidth = Math.max(1, columns >= 4 ? columns - 2 : columns);
+    const suggestionsWidth = Math.max(1, columns);
 
     return (
         <Box flexDirection="column">
@@ -294,37 +331,37 @@ export const PromptInput = ({
                     commands={matchingCommands}
                     selectedIndex={autocomplete.current.selectedIndex}
                     width={suggestionsWidth}
-                    maxVisible={5}
+                    maxVisible={maxSuggestionsVisible}
                 />
             )}
 
-            <Box flexDirection="column" height={rows} flexShrink={0}>
-                {disabled ? (
-                    <Text wrap="truncate-end">
-                        <Text color={palette.primary}>› </Text>
-                        <Text dimColor>Working… Ctrl+C to cancel</Text>
-                    </Text>
-                ) : (
-                    lines.map((line, index) => (
-                        <Text key={index} wrap="truncate-end">
-                            <Text color={palette.primary} bold>
-                                {index === 0 ? "› " : "  "}
-                            </Text>
-                            {line.cursor === undefined ? (
-                                line.characters.join("")
-                            ) : (
-                                <>
-                                    {line.characters.slice(0, line.cursor).join("")}
-                                    <Text inverse>{line.characters[line.cursor] ?? " "}</Text>
-                                    {line.characters.slice(line.cursor + 1).join("")}
-                                    {draft.current.characters.length === 0 && (
-                                        <Text dimColor>Ask Akkco anything…</Text>
-                                    )}
-                                </>
-                            )}
+            <Box
+                flexDirection="column"
+                borderStyle={compact ? undefined : "round"}
+                borderColor={disabled ? palette.muted : palette.primary}
+                paddingX={compact ? 0 : 1}
+                height={rows + (compact ? 0 : 2)}
+                flexShrink={0}
+            >
+                {lines.map((line, index) => (
+                    <Text key={index} wrap="truncate-end">
+                        <Text color={palette.primary} bold>
+                            {index === 0 ? "› " : "  "}
                         </Text>
-                    ))
-                )}
+                        {line.cursor === undefined || disabled ? (
+                            line.characters.join("")
+                        ) : (
+                            <>
+                                {line.characters.slice(0, line.cursor).join("")}
+                                <Text inverse>{line.characters[line.cursor] ?? " "}</Text>
+                                {line.characters.slice(line.cursor + 1).join("")}
+                                {draft.current.characters.length === 0 && (
+                                    <Text dimColor>Ask Akkco anything…</Text>
+                                )}
+                            </>
+                        )}
+                    </Text>
+                ))}
             </Box>
         </Box>
     );

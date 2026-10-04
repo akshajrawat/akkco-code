@@ -11,16 +11,28 @@ export type ConversationLine = {
     bold?: boolean;
 };
 
-export const calculateLayout = (columns = 80, rows = 24) => {
+export interface TerminalLayout {
+    width: number;
+    height: number;
+    blockLogo: boolean;
+    headerHeight: number;
+    promptRows: number;
+    footerHeight: number;
+    conversationHeight: number;
+}
+
+export const calculateLayout = (columns = 80, rows = 24): TerminalLayout => {
     const width = Math.max(1, Math.floor(columns) || 80);
 
-    // Ink adds a trailing newline. Reserve that row to prevent terminal scrolling.
+    // Ink adds a trailing newline. Bound live redraws so it never clears native scrollback.
     const height = Math.max(1, (Math.floor(rows) || 24) - 1);
     const blockLogo = width >= 52 && height >= 20;
 
     const headerHeight = blockLogo ? 7 : height >= 12 ? 4 : height >= 6 ? 2 : 0;
-    const promptRows = height >= 12 ? 2 : 1;
-    const footerHeight = Math.min(height, promptRows + 2);
+    const promptRows = height >= 14 ? 2 : 1;
+    const promptBoxHeight = promptRows + (height < 3 || width < 10 ? 0 : 2);
+    const statusBarHeight = height >= 6 ? 1 : 0;
+    const footerHeight = Math.min(height, promptBoxHeight + statusBarHeight);
 
     return {
         width,

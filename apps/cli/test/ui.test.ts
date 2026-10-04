@@ -141,18 +141,19 @@ for (const [columns, rows, block] of [
     [47, 24, false],
     [80, 12, false],
 ] as const) {
-    test(`full-screen header and footer fit ${columns}×${rows}`, async () => {
+    test(`header and footer fit within ${columns}×${rows}`, async () => {
         const terminal = mount(columns, rows);
 
         try {
             await waitFor(() => terminal.frame().includes("Idle"));
 
             const lines = terminal.frame().trimEnd().split("\n");
-            assert.equal(lines.length, rows - 1);
+            assert.ok(lines.length <= rows - 1);
             assert.ok(lines.every((line) => Array.from(line).length <= columns));
             assert.equal(terminal.frame().includes("▄"), block);
             assert.match(lines.at(-1)!, /Idle/);
-            assert.match(lines.at(-(calculateLayout(columns, rows).promptRows + 1))!, /›/);
+            assert.ok(lines.some((line) => line.includes("›")));
+            assert.match(lines.at(-(calculateLayout(columns, rows).promptRows + 2))!, /›/);
 
             if (block) {
                 const title = lines.find((line) => line.includes("Akkco Code"))!;
@@ -169,7 +170,7 @@ for (const [columns, rows, block] of [
     });
 }
 
-test("streaming stays inside the viewport, PageUp/PageDown scroll history, resize and /clear relayout", async () => {
+test("streaming text stays bounded, PageUp/PageDown inspect the live response, and /clear resets conversation", async () => {
     const content = Array.from({ length: 60 }, (_, index) => `line ${index}`).join("\n");
     let release = () => {};
 
@@ -186,13 +187,9 @@ test("streaming stays inside the viewport, PageUp/PageDown scroll history, resiz
         await waitFor(() => terminal.frame().includes("line 59"));
 
         assert.equal(uiStatus(terminal.controller.getSnapshot()), "Thinking");
-        assert.equal(terminal.frame().trimEnd().split("\n").length, 23);
-        assert.doesNotMatch(terminal.frame(), /line 0\n/);
-        assert.doesNotMatch(terminal.rawOutput(), /\x1b\[2J|\x1b\[3J/);
 
         terminal.input.write("\x1b[5~");
-        await waitFor(() => terminal.frame().includes("History ↑"));
-        assert.doesNotMatch(terminal.frame(), /line 59/);
+        await waitFor(() => terminal.frame().includes("Response ↑"));
 
         terminal.input.write("\x1b[6~");
         await waitFor(() => terminal.frame().includes("line 59"));
@@ -201,11 +198,14 @@ test("streaming stays inside the viewport, PageUp/PageDown scroll history, resiz
         terminal.output.rows = 12;
         terminal.output.emit("resize");
 
-        await waitFor(() => terminal.frame().includes("AKKCO CODE"));
-        assert.equal(terminal.frame().trimEnd().split("\n").length, 11);
+        await waitFor(
+            () => terminal.frame().includes("line 59") && terminal.frame().includes("Thinking"),
+        );
         assert.ok(
             terminal
                 .frame()
+                .split("You\n")
+                .at(-1)!
                 .split("\n")
                 .every((line) => Array.from(line).length <= 47),
         );
@@ -222,7 +222,6 @@ test("streaming stays inside the viewport, PageUp/PageDown scroll history, resiz
         await terminal.controller.submit("/clear");
         await waitFor(() => terminal.frame().includes("Conversation cleared."));
         assert.equal(terminal.controller.getSnapshot().history.length, 1);
-        assert.doesNotMatch(terminal.frame(), /line 59/);
         assert.equal(uiStatus(terminal.controller.getSnapshot()), "Idle");
     } finally {
         release();
@@ -230,7 +229,7 @@ test("streaming stays inside the viewport, PageUp/PageDown scroll history, resiz
     }
 });
 
-test("mouse wheel, Up/Down arrow at empty prompt, and Shift+PageUp scroll history", async () => {
+test("navigation and interactive inputs are handled cleanly in inline scrollback mode", async () => {
     const content = Array.from({ length: 40 }, (_, index) => `history_entry_${index}`).join("\n");
     let release = () => {};
 
@@ -248,25 +247,20 @@ test("mouse wheel, Up/Down arrow at empty prompt, and Shift+PageUp scroll histor
         await turn;
         await waitFor(() => terminal.controller.getSnapshot().status === "idle");
 
-        // 1. Up arrow at empty prompt scrolls up
-        terminal.input.write("\x1b[A");
-        await waitFor(() => terminal.frame().includes("History ↑1"));
+        // Verify history entries are committed and preserved
+        const history = terminal.controller.getSnapshot().history;
+        assert.ok(
+            history.some(
+                (item) => item.type === "message" && item.content.includes("history_entry_39"),
+            ),
+        );
 
-        // 2. Down arrow at empty prompt scrolls down
-        terminal.input.write("\x1b[B");
-        await waitFor(() => !terminal.frame().includes("History ↑"));
-
-        // 3. Shift+PageUp scrolls up by page
-        terminal.input.write("\x1b[5;2~");
-        await waitFor(() => terminal.frame().includes("History ↑"));
-
-        // 4. SGR mouse wheel down scrolls back towards bottom
-        terminal.input.write("\x1b[<65;10;10M");
-        await waitFor(() => terminal.frame().includes("History ↑"));
-
-        // 5. SGR mouse wheel up scrolls back up
-        terminal.input.write("\x1b[<64;10;10M");
-        await waitFor(() => terminal.frame().includes("History ↑"));
+        // Typing and navigation at prompt work cleanly
+        terminal.input.write("/clear");
+        await waitFor(() => terminal.frame().includes("/clear"));
+        terminal.input.write("\r");
+        await waitFor(() => terminal.frame().includes("Conversation cleared."));
+        assert.equal(uiStatus(terminal.controller.getSnapshot()), "Idle");
     } finally {
         release();
         terminal.cleanup();
@@ -483,7 +477,7 @@ test("tool states include running and failure; automatic results stay out of the
     }
 });
 
-test("alternate screen cleanup disables paste, restores raw mode and is idempotent", () => {
+test("normal screen cleanup disables paste, restores raw mode and is idempotent", () => {
     const rawModes: boolean[] = [];
 
     const input = Object.assign(new PassThrough(), {
@@ -506,15 +500,17 @@ test("alternate screen cleanup disables paste, restores raw mode and is idempote
         output as unknown as typeof process.stdout,
     );
 
-    assert.ok(written.includes("\x1b[?1049h"));
+    assert.ok(written.includes("\x1b[2J\x1b[H"));
     assert.ok(written.includes("\x1b[?2004h"));
+    assert.ok(!written.includes("\x1b[?1007"));
 
     restore();
     restore();
 
     assert.deepEqual(rawModes, [false]);
     assert.equal(input.isPaused(), true);
-    assert.equal(written.split("\x1b[?1049l").length - 1, 1);
+    assert.ok(!written.includes("\x1b[?1049"));
+    assert.equal(written.split("\x1b[?2004l").length - 1, 1);
     assert.ok(written.includes("\x1b[?25h"));
     assert.ok(written.includes("\x1b[?2004l"));
 
@@ -547,5 +543,82 @@ test("runtime errors remain visible as UI state and /clear returns to idle", asy
         assert.equal(terminal.controller.getSnapshot().history.length, 1);
     } finally {
         terminal.cleanup();
+    }
+});
+
+test("draft stays editable during generation, queued prompts run in order, and unsubmitted text survives", async () => {
+    let release = () => {};
+    const pause = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+    const terminal = mount(
+        80,
+        24,
+        createProvider([{ type: "text", content: "streaming response" }], pause),
+    );
+    try {
+        const turn = terminal.controller.submit("first");
+        await waitFor(() => terminal.frame().includes("Thinking"));
+        terminal.input.write("next draff");
+        terminal.input.write("\x7ft");
+        await waitFor(() => terminal.frame().includes("› next draft"));
+        assert.equal(terminal.controller.getSnapshot().status, "generating");
+        terminal.input.write("\r");
+        await waitFor(() => terminal.frame().includes("1 queued"));
+        terminal.input.write("\x1b[200~third\nmultiline\x1b[201~");
+        terminal.input.write("\r");
+        await waitFor(() => terminal.frame().includes("2 queued"));
+        terminal.input.write("keep editing");
+        await waitFor(() => terminal.frame().includes("keep editing"));
+        release();
+        await turn;
+        await waitFor(() => terminal.frame().includes("Idle"));
+        assert.ok(terminal.frame().includes("keep editing"));
+        const prompts = terminal.controller
+            .getSnapshot()
+            .history.filter((item) => item.type === "message" && item.role === "user");
+        assert.deepEqual(
+            prompts.map((item) => item.type === "message" && item.content),
+            ["first", "next draft", "third\nmultiline"],
+        );
+        assert.deepEqual(terminal.controller.getSnapshot().queuedPrompts, []);
+    } finally {
+        release();
+        terminal.cleanup();
+    }
+});
+
+test("interrupt, exit, and disposal discard queued turns", async () => {
+    for (const action of ["interrupt", "exit", "dispose"] as const) {
+        let release = () => {};
+        const pause = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const terminal = mount(
+            80,
+            24,
+            createProvider([{ type: "text", content: "partial" }], pause),
+        );
+        try {
+            const turn = terminal.controller.submit("first");
+            await waitFor(() => terminal.controller.getSnapshot().assistantText === "partial");
+            await terminal.controller.submit("must not run");
+            await terminal.controller.submit("   ");
+            assert.deepEqual(terminal.controller.getSnapshot().queuedPrompts, ["must not run"]);
+            terminal.controller[action]();
+            release();
+            await turn;
+            assert.deepEqual(terminal.controller.getSnapshot().queuedPrompts, []);
+            assert.ok(
+                !terminal.controller
+                    .getSnapshot()
+                    .history.some(
+                        (item) => item.type === "message" && item.content === "must not run",
+                    ),
+            );
+        } finally {
+            release();
+            terminal.cleanup();
+        }
     }
 });

@@ -3,12 +3,11 @@ import assert from "node:assert";
 import test from "node:test";
 import {
     AgentLoopError,
-    canonicalizeValue,
     createAkkcoRuntime,
-    getToolCallSignature,
     type RuntimeEvent,
     type RuntimeToolHost,
 } from "../src/index.js";
+import { canonicalizeValue, getToolCallSignature } from "../src/runtime/reliability.js";
 
 // Helper to create a runtime event collector
 const collectEvents = async (

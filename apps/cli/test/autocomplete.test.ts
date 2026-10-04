@@ -508,9 +508,11 @@ test("enterTerminal does not emit mouse tracking codes ?1000h or ?1002h, preserv
     assert.ok(!written.includes("\x1b[?1002h"), "Must not enable mouse drag tracking");
     assert.ok(!written.includes("\x1b[?1006h"), "Must not enable SGR mouse tracking");
 
-    // Must still contain alternate screen and bracketed paste
-    assert.ok(written.includes("\x1b[?1049h"));
+    // Clear the launch command without switching away from native scrollback.
+    assert.ok(written.includes("\x1b[2J\x1b[H"));
+    assert.ok(!written.includes("\x1b[?1049"));
     assert.ok(written.includes("\x1b[?2004h"));
+    assert.ok(!written.includes("\x1b[?1007"));
 
     restore();
     input.destroy();

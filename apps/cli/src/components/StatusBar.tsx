@@ -15,17 +15,17 @@ const getStatusColor = (status: string, stateStatus: CliViewState["status"]) => 
     return palette.success;
 };
 
-const getContextHint = (offset: number, columns: number) => {
-    if (offset > 0) {
-        return ` · History ↑${offset} · PgDn/↓: latest`;
+const getContextHint = (offset: number | undefined, columns: number) => {
+    if (offset && offset > 0) {
+        return ` · Response ↑${offset} · PgDn/↓: latest`;
     }
 
     if (columns >= 100) {
-        return " · /tools /clear /exit · PgUp/↑";
+        return " · / commands · scroll to explore";
     }
 
     if (columns >= 70) {
-        return " · /exit · PgUp/↑";
+        return " · / commands";
     }
 
     return "";
@@ -40,11 +40,15 @@ export const StatusBar = ({
     metadata: CliMetadata;
     state: CliViewState;
     columns: number;
-    offset: number;
+    offset?: number;
 }) => {
-    const status = uiStatus(state);
-    const color = getStatusColor(status, state.status);
-    const context = getContextHint(offset, columns);
+    const queued = state.queuedPrompts?.length ?? 0;
+    const status = `${uiStatus(state)}${queued ? ` · ${queued} queued` : ""}`;
+    const color = getStatusColor(uiStatus(state), state.status);
+    const context =
+        state.status !== "idle" && !offset
+            ? " · Enter: queue · Ctrl+C: cancel"
+            : getContextHint(offset, columns);
 
     const toolModeDetail = columns >= 40 ? ` · ${metadata.toolMode}` : "";
     const providerDetail = columns >= 90 ? ` · ${metadata.provider}` : "";
@@ -52,8 +56,10 @@ export const StatusBar = ({
 
     return (
         <Text wrap="truncate-end">
-            <Text color={color}>{status}</Text>
-            <Text dimColor>{fitLine(` · ${details}`, Math.max(0, columns - status.length))}</Text>
+            <Text color={color}>● {status}</Text>
+            <Text dimColor>
+                {fitLine(` · ${details}`, Math.max(0, columns - status.length - 2))}
+            </Text>
         </Text>
     );
 };

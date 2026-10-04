@@ -1,6 +1,10 @@
 import type { ModelTool } from "@akkco/models";
 
-export type RuntimeToolHost = {
+export interface RuntimeToolResult {
+    content: string;
+}
+
+export interface RuntimeToolHost {
     tools: ModelTool[];
-    execute: (name: string, input: unknown) => Promise<{ content: string }>;
-};
+    execute(name: string, input: unknown): Promise<RuntimeToolResult>;
+}

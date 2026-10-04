@@ -1,16 +1,10 @@
 import { Box, Text } from "ink";
 import type { CliMetadata } from "../state/types.js";
 import { palette } from "../theme/palette.js";
-import { calculateLayout, displayDirectory, fitLine } from "../ui/layout.js";
+import { displayDirectory, fitLine, type TerminalLayout } from "../ui/layout.js";
 import { Logo } from "./Logo.js";
 
-export const Header = ({
-    metadata,
-    layout,
-}: {
-    metadata: CliMetadata;
-    layout: ReturnType<typeof calculateLayout>;
-}) => {
+export const Header = ({ metadata, layout }: { metadata: CliMetadata; layout: TerminalLayout }) => {
     if (!layout.headerHeight) {
         return null;
     }

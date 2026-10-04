@@ -12,42 +12,18 @@ const colors = {
     muted: palette.muted,
 };
 
-export const Conversation = ({
-    lines,
-    height,
-    empty,
-}: {
-    lines: ConversationLine[];
-    height: number;
-    empty: boolean;
-}) => {
-    return (
-        <Box
-            flexDirection="column"
-            height={height}
-            flexShrink={0}
-            paddingX={1}
-            overflow="hidden"
-            justifyContent={empty ? "center" : "flex-start"}
-            alignItems={empty ? "center" : "stretch"}
-        >
-            {empty && height > 0 ? (
-                <Text dimColor wrap="truncate-end">
-                    Ask Akkco about this repository.
-                </Text>
-            ) : (
-                lines.map((line, index) => (
-                    <Text
-                        key={index}
-                        color={colors[line.tone]}
-                        bold={line.bold}
-                        dimColor={line.tone === "muted"}
-                        wrap="truncate-end"
-                    >
-                        {line.text || " "}
-                    </Text>
-                ))
-            )}
-        </Box>
-    );
-};
+export const Conversation = ({ lines }: { lines: ConversationLine[] }) => (
+    <Box flexDirection="column" flexShrink={0} paddingX={1}>
+        {lines.map((line, index) => (
+            <Text
+                key={index}
+                color={colors[line.tone]}
+                bold={line.bold}
+                dimColor={line.tone === "muted"}
+                wrap="truncate-end"
+            >
+                {line.text || " "}
+            </Text>
+        ))}
+    </Box>
+);

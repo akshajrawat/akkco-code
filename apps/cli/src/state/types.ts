@@ -1,4 +1,20 @@
-import type { RuntimeToolExecutionEvent } from "@akkco/core";
+import type { RuntimeReliabilityOptions, RuntimeToolExecutionEvent } from "@akkco/core";
+import type { ModelProvider } from "@akkco/models";
+import type { CommandRegistry } from "../commands/command-registry.js";
+import type { ToolRegistry } from "@akkco/tools";
+
+export interface CliControllerOptions {
+    provider: ModelProvider;
+    toolRegistry: ToolRegistry;
+    commandRegistry?: CommandRegistry;
+    reliabilityOptions?: RuntimeReliabilityOptions;
+}
+
+export type NoticeKind = "info" | "error" | "warning";
+
+export type CliStatus = "idle" | "generating" | "tool";
+
+export type CliOutcome = "cancelled" | "error";
 
 export type CliMetadata = {
     version: string;
@@ -25,7 +41,7 @@ export type HistoryItemPayload =
       }
     | {
           type: "notice";
-          kind: "info" | "error" | "warning";
+          kind: NoticeKind;
           content: string;
       }
     | {
@@ -40,8 +56,9 @@ export type CliViewState = {
     historyVersion: number;
     assistantText: string;
     activeTool?: ToolExecutionState;
-    status: "idle" | "generating" | "tool";
-    outcome?: "cancelled" | "error";
+    status: CliStatus;
+    outcome?: CliOutcome;
+    queuedPrompts?: readonly string[];
     exited: boolean;
 };
 

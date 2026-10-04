@@ -5,7 +5,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
 import {
-    CommandRegistry,
     createBuiltinCommandRegistry,
     createCommandRegistry,
     type CliCommand,
@@ -302,7 +301,7 @@ test("command registry rejects duplicate command names if registration is dynami
     );
 });
 
-test("controller still prevents concurrent submissions while async command execution is running", async () => {
+test("controller queues submissions while async command execution is running", async () => {
     const toolRegistry = createToolRegistry();
     let releaseToolExecution = () => {};
 
@@ -331,9 +330,12 @@ test("controller still prevents concurrent submissions while async command execu
     // Controller should be locked
     assert.notStrictEqual(controller.getSnapshot().status, "idle");
 
-    // Second submission while busy should be dropped
+    // Second submission waits for the tool rather than running concurrently.
     const secondSubmission = controller.submit("second prompt while busy");
     await secondSubmission;
+
+    assert.deepEqual(controller.getSnapshot().queuedPrompts, ["second prompt while busy"]);
+    assert.ok(!controller.getSnapshot().history.some((item) => item.type === "message"));
 
     // Release first command
     releaseToolExecution();
@@ -342,9 +344,12 @@ test("controller still prevents concurrent submissions while async command execu
     // Controller returns to idle
     assert.strictEqual(controller.getSnapshot().status, "idle");
 
-    // The second prompt must not have been processed or recorded as a user message
-    const userMessages = controller.getSnapshot().history.filter((h) => h.type === "message");
-    assert.strictEqual(userMessages.length, 0);
+    const messages = controller.getSnapshot().history.filter((h) => h.type === "message");
+    assert.deepEqual(
+        messages.map((item) => item.content),
+        ["second prompt while busy", "test response"],
+    );
+    assert.deepEqual(controller.getSnapshot().queuedPrompts, []);
 });
 
 test("existing /clear Session semantics remain intact", async () => {

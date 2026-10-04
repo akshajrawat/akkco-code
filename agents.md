@@ -21,6 +21,14 @@
 - Before adding a new export, ask: "Is this part of the package contract, or only an implementation detail?"
 - Removing unnecessary exports is preferred while the project is still pre-stable, before consumers begin depending on them.
 
+### Type Extraction
+
+- Do not replace inline object types with named interfaces mechanically.
+- Keep small, local, one-use types inline when they remain readable.
+- Extract a named type or interface when the shape represents a meaningful domain concept, is reused across files/functions, forms a public or architectural boundary, or has grown large enough that naming improves comprehension.
+- Discriminated-union variants may remain type aliases; do not convert `type` to `interface` purely for stylistic consistency.
+- Prefer semantic names over structural cleanup. A named type should exist because the concept deserves a name, not merely because an inline type exists.
+
 ## Repository Structure
 
 - Prefer conceptual grouping over large flat directories.

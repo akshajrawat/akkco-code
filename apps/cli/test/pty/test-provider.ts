@@ -21,10 +21,15 @@ export class DeterministicTestProvider implements ModelProvider {
 
         return {
             async *[Symbol.asyncIterator]() {
-                if (content.includes("__TEST_WAIT__")) {
+                if (content.includes("__TEST_WAIT__") || content.includes("__TEST_LONG_WAIT__")) {
                     yield {
                         type: "text",
-                        content: "Starting wait task...",
+                        content: content.includes("__TEST_LONG_WAIT__")
+                            ? Array.from(
+                                  { length: 35 },
+                                  (_, index) => `Live line ${index + 1}`,
+                              ).join("\n")
+                            : "Starting wait task...",
                     } satisfies ModelEvent;
 
                     if (request.signal) {

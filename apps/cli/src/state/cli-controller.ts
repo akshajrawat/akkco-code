@@ -1,13 +1,17 @@
 import { createAkkcoRuntime, type RuntimeReliabilityOptions, Session } from "@akkco/core";
-import type { ModelProvider } from "@akkco/models";
-import { toModelTools, type ToolRegistry } from "@akkco/tools";
+import { toModelTools } from "@akkco/tools";
 import {
     type CommandContext,
     type CommandMetadata,
     type CommandRegistry,
     createBuiltinCommandRegistry,
 } from "../commands/command-registry.js";
-import type { CliPresentationEvent, CliViewState, HistoryItem } from "./types.js";
+import type {
+    CliControllerOptions,
+    CliPresentationEvent,
+    CliViewState,
+    HistoryItem,
+} from "./types.js";
 
 export const parseMaxToolIterations = (envValue?: string): number | undefined => {
     if (envValue === undefined) {
@@ -28,12 +32,7 @@ export const createCliController = ({
     toolRegistry,
     commandRegistry = createBuiltinCommandRegistry(),
     reliabilityOptions,
-}: {
-    provider: ModelProvider;
-    toolRegistry: ToolRegistry;
-    commandRegistry?: CommandRegistry;
-    reliabilityOptions?: RuntimeReliabilityOptions;
-}) => {
+}: CliControllerOptions) => {
     let state: CliViewState = {
         history: [],
         historyVersion: 0,
@@ -132,6 +131,7 @@ export const createCliController = ({
             return;
         }
 
+        update({ queuedPrompts: [] });
         activeAbort?.abort();
         commitAssistant();
 
@@ -144,6 +144,7 @@ export const createCliController = ({
     };
 
     const interrupt = () => {
+        update({ queuedPrompts: [] });
         if (activeAbort) {
             activeAbort.abort();
             update({ outcome: "cancelled" });
@@ -189,14 +190,24 @@ export const createCliController = ({
     };
 
     const submit = async (input: string) => {
-        if (state.exited || state.status !== "idle") {
+        if (state.exited) {
             return;
         }
 
         if (!input.trim()) {
-            emit({ type: "idle" });
+            if (state.status === "idle") {
+                emit({ type: "idle" });
+            }
             return;
         }
+
+        if (state.status !== "idle") {
+            update({ queuedPrompts: [...(state.queuedPrompts ?? []), input] });
+            return;
+        }
+
+        const abort = new AbortController();
+        activeAbort = abort;
 
         // Lock synchronously, including while an asynchronous command is executing.
         update({ status: "generating", outcome: undefined });
@@ -207,9 +218,6 @@ export const createCliController = ({
             }
 
             append({ id: nextId++, type: "message", role: "user", content: input });
-
-            const abort = new AbortController();
-            activeAbort = abort;
 
             try {
                 for await (const event of session.send(input, abort.signal)) {
@@ -252,16 +260,21 @@ export const createCliController = ({
                     );
                 }
             } finally {
-                activeAbort = undefined;
                 commitAssistant();
             }
         } catch (error) {
             notice(`Error: ${error instanceof Error ? error.message : String(error)}`, "error");
         } finally {
-            update({ status: "idle", activeTool: undefined });
+            activeAbort = undefined;
+            const [nextPrompt, ...remaining] = state.queuedPrompts ?? [];
+            update({ status: "idle", activeTool: undefined, queuedPrompts: remaining });
 
             if (!state.exited) {
-                emit({ type: "idle" });
+                if (nextPrompt !== undefined) {
+                    await submit(nextPrompt);
+                } else {
+                    emit({ type: "idle" });
+                }
             }
         }
     };
@@ -292,7 +305,7 @@ export const createCliController = ({
         notice,
 
         dispose: () => {
-            activeAbort?.abort();
+            exit(false);
             subscribers.clear();
             eventListeners.clear();
         },
