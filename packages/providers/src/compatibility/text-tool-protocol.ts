@@ -87,6 +87,15 @@ export const transformRequestHistoryForCompatibility = (
     return transformed;
 };
 
+export const COMPATIBILITY_REPAIR_INSTRUCTION =
+    "Your previous response attempted a tool call but violated the Akkco tool-call protocol.\n" +
+    "The tool was NOT executed.\n" +
+    "If you still need to call a tool, retry now using exactly one <akkco_tool_call> envelope with valid JSON and no prose or Markdown before or after it.";
+
+export const hasCompatibilityToolIntent = (text: string): boolean => {
+    return text.includes("akkco_tool");
+};
+
 export interface ParsedToolCall {
     name: string;
     arguments: unknown;
@@ -97,23 +106,43 @@ export const parseCompatibilityToolCall = (
     advertisedTools: ModelTool[],
 ): ParsedToolCall => {
     const trimmed = text.trim();
-    if (!trimmed.startsWith(TOOL_CALL_OPEN_TAG) || !trimmed.endsWith(TOOL_CALL_CLOSE_TAG)) {
+
+    if (!trimmed.includes(TOOL_CALL_OPEN_TAG)) {
         throw new Error(
             "Compatibility tool protocol error: response must be enclosed in <akkco_tool_call> envelope",
         );
     }
 
+    if (!trimmed.includes(TOOL_CALL_CLOSE_TAG)) {
+        throw new Error(
+            "Compatibility tool protocol error: unclosed <akkco_tool_call> envelope; closing tag is missing.",
+        );
+    }
+
     const openCount = trimmed.split(TOOL_CALL_OPEN_TAG).length - 1;
     const closeCount = trimmed.split(TOOL_CALL_CLOSE_TAG).length - 1;
-    if (openCount !== 1 || closeCount !== 1) {
+    if (openCount > 1 || closeCount > 1) {
         throw new Error(
             "Compatibility tool protocol error: model emitted multiple tool calls in one turn; only one is supported.",
         );
     }
 
-    const body = trimmed
-        .slice(TOOL_CALL_OPEN_TAG.length, trimmed.length - TOOL_CALL_CLOSE_TAG.length)
-        .trim();
+    const openIndex = trimmed.indexOf(TOOL_CALL_OPEN_TAG);
+    if (openIndex > 0) {
+        throw new Error(
+            "Compatibility tool protocol error: model emitted unexpected text before tool call envelope; no prose allowed outside envelope.",
+        );
+    }
+
+    const closeIndex = trimmed.indexOf(TOOL_CALL_CLOSE_TAG);
+    const afterClose = trimmed.slice(closeIndex + TOOL_CALL_CLOSE_TAG.length);
+    if (afterClose.trim() !== "") {
+        throw new Error(
+            "Compatibility tool protocol error: model emitted unexpected text after tool call envelope; no prose allowed outside envelope.",
+        );
+    }
+
+    const body = trimmed.slice(openIndex + TOOL_CALL_OPEN_TAG.length, closeIndex).trim();
 
     let parsed: unknown;
     try {
@@ -151,4 +180,26 @@ export const parseCompatibilityToolCall = (
         name: toolName,
         arguments: args,
     };
+};
+
+export type CompatibilityTurnClassification =
+    | { type: "valid_tool_call"; toolCall: ParsedToolCall }
+    | { type: "protocol_violation"; reason: string }
+    | { type: "normal_prose" };
+
+export const classifyCompatibilityTurn = (
+    text: string,
+    advertisedTools: ModelTool[],
+): CompatibilityTurnClassification => {
+    if (!hasCompatibilityToolIntent(text)) {
+        return { type: "normal_prose" };
+    }
+
+    try {
+        const toolCall = parseCompatibilityToolCall(text, advertisedTools);
+        return { type: "valid_tool_call", toolCall };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { type: "protocol_violation", reason: message };
+    }
 };

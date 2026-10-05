@@ -62,7 +62,7 @@ Provider
    ↓
 ModelTextEvent
    ↓
-Text Tool Compatibility Provider
+Text Tool Compatibility Provider (Strict Protocol & Recovery v1)
    ↓
 ModelToolCallEvent
    ↓
@@ -78,6 +78,19 @@ In compatibility mode (the CLI default to match `qwen2.5-coder:3b`), the wrapper
 - Emits real-time `ModelTextEvent` chunks for non-protocol prose without buffering delays.
 - Buffers and validates exact `<akkco_tool_call>` envelopes and emits standard `ModelToolCallEvent`s to Runtime.
 - Runtime remains completely provider-neutral and unaware whether events originated natively or via compatibility.
+
+##### Compatibility Recovery v1
+
+Smaller or local models (such as `qwen2.5-coder:7b`) may exhibit tool intent while violating the strict envelope contract (e.g. conversational prose before or after the envelope, Markdown fencing around the envelope, malformed JSON, unclosed tags, multiple envelopes, or unadvertised tools). Compatibility Recovery v1 provides deterministic error recovery:
+
+- **Strict Safety Guarantee**: Malformed calls are never executed. JSON embedded in arbitrary prose is never parsed or extracted, and the parser is never permissive.
+- **Protocol Violation Detection**: Output with tool markers (`<akkco_tool` or `</akkco_tool`) that fails strict single-envelope validation is classified as a protocol violation.
+- **Deterministic 1-Turn Repair**: The compatibility provider suppresses any tool-protocol fragments from leaking to the user and issues a single corrective repair request containing the malformed assistant response and `COMPATIBILITY_REPAIR_INSTRUCTION` ("Your previous response attempted a tool call but violated the Akkco tool-call protocol...").
+- **Repaired Execution**: If the model retries with a strictly valid envelope, `ModelToolCallEvent` is emitted once, and Runtime executes the tool normally.
+- **Repair Abandonment**: If the model abandons tool usage and replies with pure conversational prose, the text is accepted as final prose and streamed to the user.
+- **Terminal Error on Repeated Violation**: If the second turn also violates the protocol, generation terminates immediately with a clear `Compatibility tool protocol error`. No infinite loops or Runtime reliability retries are triggered.
+- **Cancellation**: `AbortSignal` is checked at every transition (before, during, and after repair turns), ensuring cancellation always cleanly throws `AbortError` without being masked as a protocol violation.
+- **History Isolation**: Recovery feedback is local to the compatibility wrapper's request turn and never pollutes provider-neutral Runtime history.
 
 Explicit `AKKCO_TOOL_MODE=native` can be selected when using models/providers with reliable native structured tool calling.
 

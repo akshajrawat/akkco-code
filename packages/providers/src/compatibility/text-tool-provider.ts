@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type {
     ModelEvent,
+    ModelItem,
     ModelProvider,
     ModelRequest,
     ModelTextEvent,
     ModelToolCallEvent,
 } from "@akkco/models";
 import {
-    parseCompatibilityToolCall,
-    TOOL_CALL_CLOSE_TAG,
+    classifyCompatibilityTurn,
+    COMPATIBILITY_REPAIR_INSTRUCTION,
     TOOL_CALL_OPEN_TAG,
     transformRequestHistoryForCompatibility,
 } from "./text-tool-protocol.js";
@@ -24,6 +25,12 @@ const throwIfAborted = (signal?: AbortSignal) => {
     }
 };
 
+interface ReadTurnResult {
+    rawText: string;
+    bufferedText: string;
+    nativeToolCallEmitted: boolean;
+}
+
 export class TextToolCompatibilityProvider implements ModelProvider {
     readonly id: string;
 
@@ -31,8 +38,85 @@ export class TextToolCompatibilityProvider implements ModelProvider {
         this.id = `${provider.id}-compatibility`;
     }
 
+    private async *readTurn(
+        request: ModelRequest,
+    ): AsyncGenerator<ModelEvent, ReadTurnResult, unknown> {
+        let rawText = "";
+        let bufferedText = "";
+        let state: "DETECTING" | "STREAMING_PROSE" | "SUPPRESSING" = "DETECTING";
+
+        for await (const event of this.provider.stream(request)) {
+            throwIfAborted(request.signal);
+
+            if (event.type === "tool_call") {
+                if (bufferedText.length > 0) {
+                    yield { type: "text", content: bufferedText } satisfies ModelTextEvent;
+                    bufferedText = "";
+                }
+                yield event;
+                return { rawText, bufferedText: "", nativeToolCallEmitted: true };
+            }
+
+            rawText += event.content;
+
+            if (rawText.includes("akkco_tool")) {
+                state = "SUPPRESSING";
+                bufferedText = "";
+                continue;
+            }
+
+            bufferedText += event.content;
+
+            if (state === "DETECTING") {
+                const trimmed = bufferedText.trimStart();
+                if (trimmed === "") {
+                    continue;
+                }
+
+                if (
+                    TOOL_CALL_OPEN_TAG.startsWith(trimmed) ||
+                    trimmed.startsWith(TOOL_CALL_OPEN_TAG) ||
+                    trimmed.startsWith("```") ||
+                    "```".startsWith(trimmed)
+                ) {
+                    continue;
+                }
+
+                state = "STREAMING_PROSE";
+            }
+
+            if (state === "STREAMING_PROSE") {
+                const angleIndex = bufferedText.indexOf("<");
+                const fenceIndex = bufferedText.indexOf("```");
+                const markerIndex =
+                    angleIndex !== -1 && fenceIndex !== -1
+                        ? Math.min(angleIndex, fenceIndex)
+                        : angleIndex !== -1
+                          ? angleIndex
+                          : fenceIndex;
+
+                if (markerIndex === -1) {
+                    yield { type: "text", content: bufferedText } satisfies ModelTextEvent;
+                    bufferedText = "";
+                } else if (markerIndex > 0) {
+                    const safeProse = bufferedText.slice(0, markerIndex);
+                    yield { type: "text", content: safeProse } satisfies ModelTextEvent;
+                    bufferedText = bufferedText.slice(markerIndex);
+                }
+            }
+        }
+
+        throwIfAborted(request.signal);
+
+        return {
+            rawText,
+            bufferedText,
+            nativeToolCallEmitted: false,
+        };
+    }
+
     stream = (request: ModelRequest): AsyncIterable<ModelEvent> => {
-        const { provider } = this;
+        const self = this;
 
         return {
             async *[Symbol.asyncIterator](): AsyncGenerator<ModelEvent, void, unknown> {
@@ -40,7 +124,7 @@ export class TextToolCompatibilityProvider implements ModelProvider {
 
                 const hasTools = Boolean(request.tools && request.tools.length > 0);
                 if (!hasTools) {
-                    yield* provider.stream(request);
+                    yield* self.provider.stream(request);
                     return;
                 }
 
@@ -49,140 +133,99 @@ export class TextToolCompatibilityProvider implements ModelProvider {
                     request.tools,
                 );
 
-                const compatRequest: ModelRequest = {
+                const initialRequest: ModelRequest = {
                     items: compatItems,
                     tools: undefined,
                     signal: request.signal,
                 };
 
-                let state: "DETECTING" | "TOOL_BUFFERING" | "PASSTHROUGH" = "DETECTING";
-                let buffer = "";
-
-                for await (const event of provider.stream(compatRequest)) {
-                    throwIfAborted(request.signal);
-
-                    if (event.type === "tool_call") {
-                        if (buffer.length > 0) {
-                            yield { type: "text", content: buffer } satisfies ModelTextEvent;
-                            buffer = "";
-                        }
-                        yield event;
-                        continue;
-                    }
-
-                    if (state === "PASSTHROUGH") {
-                        yield event;
-                        continue;
-                    }
-
-                    buffer += event.content;
-
-                    if (state === "DETECTING") {
-                        const trimmedStart = buffer.trimStart();
-
-                        if (trimmedStart === "") {
-                            continue;
-                        }
-
-                        if (trimmedStart.length < TOOL_CALL_OPEN_TAG.length) {
-                            if (TOOL_CALL_OPEN_TAG.startsWith(trimmedStart)) {
-                                continue;
-                            }
-                        } else if (trimmedStart.startsWith(TOOL_CALL_OPEN_TAG)) {
-                            state = "TOOL_BUFFERING";
-                            const closeIndex = buffer.indexOf(TOOL_CALL_CLOSE_TAG);
-                            if (closeIndex !== -1) {
-                                const afterClose = buffer.slice(
-                                    closeIndex + TOOL_CALL_CLOSE_TAG.length,
-                                );
-                                if (afterClose.includes(TOOL_CALL_OPEN_TAG)) {
-                                    throw new Error(
-                                        "Compatibility tool protocol error: model emitted multiple tool calls in one turn; only one is supported.",
-                                    );
-                                }
-                                if (
-                                    afterClose.trim() !== "" &&
-                                    !TOOL_CALL_OPEN_TAG.startsWith(afterClose.trimStart())
-                                ) {
-                                    throw new Error(
-                                        "Compatibility tool protocol error: model emitted unexpected text after tool call envelope; no prose allowed outside envelope.",
-                                    );
-                                }
-                            }
-                            continue;
-                        }
-
-                        state = "PASSTHROUGH";
-                        yield { type: "text", content: buffer } satisfies ModelTextEvent;
-                        buffer = "";
-                        continue;
-                    }
-
-                    if (state === "TOOL_BUFFERING") {
-                        const closeIndex = buffer.indexOf(TOOL_CALL_CLOSE_TAG);
-                        if (closeIndex !== -1) {
-                            const afterClose = buffer.slice(
-                                closeIndex + TOOL_CALL_CLOSE_TAG.length,
-                            );
-                            if (afterClose.includes(TOOL_CALL_OPEN_TAG)) {
-                                throw new Error(
-                                    "Compatibility tool protocol error: model emitted multiple tool calls in one turn; only one is supported.",
-                                );
-                            }
-                            if (
-                                afterClose.trim() !== "" &&
-                                !TOOL_CALL_OPEN_TAG.startsWith(afterClose.trimStart())
-                            ) {
-                                throw new Error(
-                                    "Compatibility tool protocol error: model emitted unexpected text after tool call envelope; no prose allowed outside envelope.",
-                                );
-                            }
-                        }
-                    }
+                const turn1 = yield* self.readTurn(initialRequest);
+                if (turn1.nativeToolCallEmitted) {
+                    return;
                 }
 
+                const classification1 = classifyCompatibilityTurn(turn1.rawText, request.tools!);
+
+                if (classification1.type === "valid_tool_call") {
+                    throwIfAborted(request.signal);
+                    yield {
+                        type: "tool_call",
+                        id: `compat_${randomUUID()}`,
+                        name: classification1.toolCall.name,
+                        arguments: classification1.toolCall.arguments,
+                    } satisfies ModelToolCallEvent;
+                    return;
+                }
+
+                if (classification1.type === "normal_prose") {
+                    if (turn1.bufferedText.length > 0) {
+                        yield {
+                            type: "text",
+                            content: turn1.bufferedText,
+                        } satisfies ModelTextEvent;
+                    }
+                    return;
+                }
+
+                // classification1 is "protocol_violation" -> initiate one repair turn
                 throwIfAborted(request.signal);
 
-                if (state === "PASSTHROUGH") {
+                const repairItems: ModelItem[] = [
+                    ...compatItems,
+                    {
+                        type: "message",
+                        role: "assistant",
+                        content: turn1.rawText,
+                    },
+                    {
+                        type: "message",
+                        role: "user",
+                        content: COMPATIBILITY_REPAIR_INSTRUCTION,
+                    },
+                ];
+
+                const repairRequest: ModelRequest = {
+                    items: repairItems,
+                    tools: undefined,
+                    signal: request.signal,
+                };
+
+                const turn2 = yield* self.readTurn(repairRequest);
+                if (turn2.nativeToolCallEmitted) {
                     return;
                 }
 
-                if (state === "DETECTING") {
-                    if (buffer.length > 0) {
-                        yield { type: "text", content: buffer } satisfies ModelTextEvent;
+                const classification2 = classifyCompatibilityTurn(turn2.rawText, request.tools!);
+
+                if (classification2.type === "valid_tool_call") {
+                    throwIfAborted(request.signal);
+                    yield {
+                        type: "tool_call",
+                        id: `compat_${randomUUID()}`,
+                        name: classification2.toolCall.name,
+                        arguments: classification2.toolCall.arguments,
+                    } satisfies ModelToolCallEvent;
+                    return;
+                }
+
+                if (classification2.type === "normal_prose") {
+                    if (turn2.bufferedText.length > 0) {
+                        yield {
+                            type: "text",
+                            content: turn2.bufferedText,
+                        } satisfies ModelTextEvent;
                     }
                     return;
                 }
 
-                if (!buffer.includes(TOOL_CALL_CLOSE_TAG)) {
-                    throw new Error(
-                        "Compatibility tool protocol error: unclosed <akkco_tool_call> envelope; closing tag is missing.",
-                    );
-                }
-
-                const openCount = buffer.split(TOOL_CALL_OPEN_TAG).length - 1;
-                const closeCount = buffer.split(TOOL_CALL_CLOSE_TAG).length - 1;
-                if (openCount > 1 || closeCount > 1) {
-                    throw new Error(
-                        "Compatibility tool protocol error: model emitted multiple tool calls in one turn; only one is supported.",
-                    );
-                }
-
-                const closeIndex = buffer.indexOf(TOOL_CALL_CLOSE_TAG);
-                const afterClose = buffer.slice(closeIndex + TOOL_CALL_CLOSE_TAG.length);
-                if (afterClose.trim() !== "") {
-                    throw new Error(
-                        "Compatibility tool protocol error: model emitted unexpected text after tool call envelope; no prose allowed outside envelope.",
-                    );
-                }
-
-                const parsed = parseCompatibilityToolCall(buffer, request.tools!);
-                yield {
-                    type: "tool_call",
-                    id: `compat_${randomUUID()}`,
-                    name: parsed.name,
-                    arguments: parsed.arguments,
-                } satisfies ModelToolCallEvent;
+                // Failed repair: second consecutive protocol violation
+                const reasonDetail = classification2.reason.replace(
+                    /^Compatibility tool protocol error:\s*/i,
+                    "",
+                );
+                throw new Error(
+                    `Compatibility tool protocol error: model failed protocol repair; ${reasonDetail}`,
+                );
             },
         };
     };

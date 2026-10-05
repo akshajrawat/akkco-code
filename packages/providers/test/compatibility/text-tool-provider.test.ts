@@ -9,7 +9,10 @@ import type {
     ModelTool,
     ModelToolCall,
 } from "@akkco/models";
-import { createTextToolCompatibilityProvider } from "../../src/index.js";
+import {
+    COMPATIBILITY_REPAIR_INSTRUCTION,
+    createTextToolCompatibilityProvider,
+} from "../../src/index.js";
 
 const sampleTool: ModelTool = {
     name: "read_file",
@@ -39,6 +42,23 @@ class MockModelProvider implements ModelProvider {
     stream = (request: ModelRequest): AsyncIterable<ModelEvent> => {
         this.lastRequest = request;
         return this.streamFn(request);
+    };
+}
+
+class MultiTurnMockModelProvider implements ModelProvider {
+    readonly id = "mock-provider";
+    public requests: ModelRequest[] = [];
+    private turnIndex = 0;
+
+    constructor(private readonly turns: Array<(req: ModelRequest) => AsyncIterable<ModelEvent>>) {}
+
+    stream = (request: ModelRequest): AsyncIterable<ModelEvent> => {
+        this.requests.push(request);
+        const turn = this.turns[this.turnIndex++];
+        if (!turn) {
+            throw new Error(`Unexpected turn request at index ${this.turnIndex - 1}`);
+        }
+        return turn(request);
     };
 }
 
@@ -228,51 +248,528 @@ test("plain JSON remains ordinary text", async () => {
     assert.strictEqual(events[0].content, jsonText);
 });
 
-// envelope appearing inside prose remains ordinary text
-test("envelope appearing inside prose remains ordinary text", async () => {
-    const prose =
-        'Here is what I plan to do:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nWhat do you think?';
-    const mock = new MockModelProvider((_req) => ({
-        async *[Symbol.asyncIterator]() {
-            yield { type: "text", content: prose };
+// prose before envelope triggers recovery and emits repaired tool call
+test("prose before envelope triggers recovery and emits repaired tool call", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'Let\'s search for that.\n\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
         },
-    }));
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
 
     const compat = createTextToolCompatibilityProvider(mock);
     const events = await collectEvents(compat, {
-        items: [{ type: "message", role: "user", content: "run" }],
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
         tools: [sampleTool],
     });
 
     assert.strictEqual(events.length, 1);
-    assert.strictEqual(events[0].type, "text");
-    assert.strictEqual(events[0].content, prose);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
+    assert.strictEqual(mock.requests.length, 2);
 });
 
-// prose before envelope prevents execution
-test("prose before envelope prevents execution", async () => {
-    const chunks = [
-        "I will call the tool:\n",
-        '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
-    ];
-
-    const mock = new MockModelProvider((_req) => ({
-        async *[Symbol.asyncIterator]() {
-            for (const chunk of chunks) {
-                yield { type: "text", content: chunk };
-            }
+// prose after envelope triggers recovery and emits repaired tool call
+test("prose after envelope triggers recovery and emits repaired tool call", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nI will inspect the file.',
+            };
         },
-    }));
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
 
     const compat = createTextToolCompatibilityProvider(mock);
     const events = await collectEvents(compat, {
-        items: [{ type: "message", role: "user", content: "run" }],
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// markdown fenced envelope triggers recovery and emits repaired tool call
+test("markdown fenced envelope triggers recovery and emits repaired tool call", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '```xml\n<akkco_tool_call>\n{"name":"read_file","arguments":{"path":"a.ts"}}\n</akkco_tool_call>\n```',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// malformed JSON triggers recovery and emits repaired tool call
+test("malformed JSON triggers recovery and emits repaired tool call", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content: '<akkco_tool_call>{name:"read_file",arguments:}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// unclosed envelope triggers recovery and emits repaired tool call
+test("unclosed envelope triggers recovery and emits repaired tool call", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content: '<akkco_tool_call>\n{"name":"read_file","arguments":{"path":"a.ts"}}',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// multiple envelopes in one response triggers recovery and emits repaired tool call
+test("multiple envelopes in one response triggers recovery and emits repaired tool call", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>' +
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"b.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// unknown tool triggers recovery and emits repaired tool call with advertised tool
+test("unknown tool triggers recovery and emits repaired tool call with advertised tool", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"unknown_tool","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read a.ts" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// successful repair verifies repair prompt and non-corrupted neutral history
+test("successful repair verifies repair prompt and non-corrupted neutral history", async () => {
+    const originalItems: ModelItem[] = [
+        { type: "message", role: "user", content: "read the config" },
+    ];
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'Sure!\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const request: ModelRequest = {
+        items: originalItems,
+        tools: [sampleTool],
+    };
+    const events = await collectEvents(compat, request);
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    // Verify original request and items are not mutated
+    assert.strictEqual(request.items, originalItems);
+    assert.strictEqual(request.items.length, 1);
+
+    // Verify repair request sent to wrapped provider
+    assert.strictEqual(mock.requests.length, 2);
+    const repairItems = mock.requests[1].items;
+    const assistantMessage = repairItems[repairItems.length - 2] as ModelMessage;
+    const correctiveMessage = repairItems[repairItems.length - 1] as ModelMessage;
+
+    assert.strictEqual(assistantMessage.role, "assistant");
+    assert.strictEqual(
+        assistantMessage.content,
+        'Sure!\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+    );
+    assert.strictEqual(correctiveMessage.role, "user");
+    assert.strictEqual(correctiveMessage.content, COMPATIBILITY_REPAIR_INSTRUCTION);
+});
+
+// repeated violation terminates with clear compatibility protocol error without looping
+test("repeated violation terminates with clear compatibility protocol error without looping", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'Prose before envelope:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'Still has prose before envelope:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    await assert.rejects(
+        async () => {
+            await collectEvents(compat, {
+                items: [{ type: "message", role: "user", content: "read a.ts" }],
+                tools: [sampleTool],
+            });
+        },
+        (err: Error) =>
+            /Compatibility tool protocol error: model failed protocol repair/i.test(err.message),
+    );
+
+    // Must have attempted repair turn exactly once
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// repair abandonment followed by normal prose is accepted as final prose
+test("repair abandonment followed by normal prose is accepted as final prose", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'Let\'s search.\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content: "I realized I do not need a tool. The answer is already clear.",
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "explain" }],
         tools: [sampleTool],
     });
 
     assert.ok(events.every((e) => e.type === "text"));
-    const combined = events.map((e) => (e as any).content).join("");
-    assert.strictEqual(combined, chunks.join(""));
+    const text = events.map((e) => (e as any).content).join("");
+    assert.strictEqual(text, "I realized I do not need a tool. The answer is already clear.");
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// fragmented streaming markers across chunks suppresses protocol fragments during Turn 1 and repairs on Turn 2
+test("fragmented streaming markers across chunks suppresses protocol fragments during Turn 1 and repairs on Turn 2", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            // Split protocol tag into tiny chunks
+            yield { type: "text", content: "<akk" };
+            yield { type: "text", content: "co_tool" };
+            yield { type: "text", content: "_call>\n" };
+            yield { type: "text", content: '{"name":"read_file","arguments":{"path":"a.ts"}}\n' };
+            yield { type: "text", content: "</akkco_tool_call>\nextra prose after" };
+        },
+        async function* () {
+            yield { type: "text", content: "<akkco_tool_" };
+            yield { type: "text", content: "call>\n" };
+            yield { type: "text", content: '{"name":"read_file","arguments":{"path":"a.ts"}}\n' };
+            yield { type: "text", content: "</akkco_tool_call>" };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read" }],
+        tools: [sampleTool],
+    });
+
+    // Exactly one repaired tool call emitted, no leaked text events
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].type, "tool_call");
+    assert.strictEqual(events[0].name, "read_file");
+    assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
+});
+
+// cancellation before repair does not start repair turn and throws AbortError
+test("cancellation before repair does not start repair turn and throws AbortError", async () => {
+    const controller = new AbortController();
+    let turn2Started = false;
+
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'prose before\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+            // Abort right as turn 1 finishes
+            controller.abort();
+        },
+        async function* () {
+            turn2Started = true;
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    await assert.rejects(
+        async () => {
+            await collectEvents(compat, {
+                items: [{ type: "message", role: "user", content: "read" }],
+                tools: [sampleTool],
+                signal: controller.signal,
+            });
+        },
+        (err: Error) => {
+            // Must be AbortError, NOT a compatibility protocol error
+            assert.ok(err.name === "AbortError" || /aborted/i.test(err.message));
+            assert.ok(!/Compatibility tool protocol error/i.test(err.message));
+            return true;
+        },
+    );
+
+    assert.strictEqual(turn2Started, false);
+    assert.strictEqual(mock.requests.length, 1);
+});
+
+// cancellation during repair throws AbortError without protocol error
+test("cancellation during repair throws AbortError without protocol error", async () => {
+    const controller = new AbortController();
+
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'prose before\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield { type: "text", content: "<akkco_tool_call>" };
+            controller.abort();
+            yield {
+                type: "text",
+                content: '{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    await assert.rejects(
+        async () => {
+            await collectEvents(compat, {
+                items: [{ type: "message", role: "user", content: "read" }],
+                tools: [sampleTool],
+                signal: controller.signal,
+            });
+        },
+        (err: Error) => {
+            assert.ok(err.name === "AbortError" || /aborted/i.test(err.message));
+            assert.ok(!/Compatibility tool protocol error/i.test(err.message));
+            return true;
+        },
+    );
+
+    assert.strictEqual(mock.requests.length, 2);
+});
+
+// repaired tool call is emitted exactly once
+test("repaired tool call is emitted exactly once", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '```xml\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\n```',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read" }],
+        tools: [sampleTool],
+    });
+
+    const toolCalls = events.filter((e) => e.type === "tool_call");
+    assert.strictEqual(toolCalls.length, 1);
+    assert.strictEqual(events.length, 1);
+});
+
+// malformed tool is never executed or emitted
+test("malformed tool is never executed or emitted", async () => {
+    const mock = new MultiTurnMockModelProvider([
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'I will run this tool:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"malformed.ts"}}</akkco_tool_call>',
+            };
+        },
+        async function* () {
+            yield {
+                type: "text",
+                content:
+                    'Still not valid:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"malformed.ts"}}</akkco_tool_call>',
+            };
+        },
+    ]);
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events: ModelEvent[] = [];
+    await assert.rejects(
+        async () => {
+            for await (const event of compat.stream({
+                items: [{ type: "message", role: "user", content: "run" }],
+                tools: [sampleTool],
+            })) {
+                events.push(event);
+            }
+        },
+        (err: Error) => /Compatibility tool protocol error/i.test(err.message),
+    );
+
+    // No tool_call event was ever emitted
+    assert.strictEqual(
+        events.some((e) => e.type === "tool_call"),
+        false,
+    );
 });
 
 // prose after envelope throws compatibility protocol error
