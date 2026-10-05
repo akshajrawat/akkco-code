@@ -1,10 +1,13 @@
+import type { ModelProvider } from "@akkco/models";
+import { createToolRegistry } from "@akkco/tools";
 import assert from "node:assert";
 import { type ChildProcess, spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseMaxToolIterations } from "../src/state/cli-controller.js";
+import { parseMaxToolIterations, parseToolMode } from "../src/config.js";
+import { createCliController } from "../src/state/cli-controller.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.resolve(__dirname, "../src/index.ts");
@@ -409,13 +412,152 @@ test("parseMaxToolIterations validates and parses environment variable correctly
     assert.throws(() => parseMaxToolIterations("-1"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
     assert.throws(() => parseMaxToolIterations("abc"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
     assert.throws(() => parseMaxToolIterations("1.5"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("Infinity"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("-Infinity"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+    assert.throws(() => parseMaxToolIterations("NaN"), /Invalid AKKCO_MAX_TOOL_ITERATIONS/);
+});
+
+test("parseToolMode defaults to compatibility and validates input cleanly", () => {
+    assert.strictEqual(parseToolMode(undefined), "compatibility");
+    assert.strictEqual(parseToolMode("compatibility"), "compatibility");
+    assert.strictEqual(parseToolMode("native"), "native");
+    assert.throws(() => parseToolMode(""), /Invalid AKKCO_TOOL_MODE/);
+    assert.throws(() => parseToolMode("unsupported_mode"), /Invalid AKKCO_TOOL_MODE/);
+});
+
+test(
+    "CLI defaults tool mode to compatibility when AKKCO_TOOL_MODE is unset",
+    { timeout: 10000 },
+    async () => {
+        let requestBody: any;
+        const server = http.createServer((req, res) => {
+            let body = "";
+            req.on("data", (d) => (body += d.toString()));
+            req.on("end", () => {
+                requestBody = JSON.parse(body);
+                res.writeHead(200, { "Content-Type": "text/event-stream" });
+                res.write(
+                    `data: ${JSON.stringify({
+                        choices: [
+                            {
+                                delta: {
+                                    content:
+                                        '<akkco_tool_call>{"name":"read_file","arguments":{"path":"apps/cli/package.json"}}</akkco_tool_call>',
+                                },
+                            },
+                        ],
+                    })}\n\n`,
+                );
+                res.end("data: [DONE]\n\n");
+            });
+        });
+
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address() as any;
+
+        const env: NodeJS.ProcessEnv = {
+            ...process.env,
+            AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+        };
+        delete env.AKKCO_TOOL_MODE;
+
+        const cp = spawn(tsxBin, [cliEntry], {
+            cwd: path.resolve(__dirname, "../../.."),
+            env,
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        let output = "";
+        cp.stdout.on("data", (d) => (output += d.toString()));
+        cp.stderr.on("data", (d) => (output += d.toString()));
+
+        try {
+            cp.stdin.end("inspect CLI\n");
+            const exitCode = await waitForExit(cp);
+            assert.strictEqual(exitCode, 0);
+            assert.strictEqual(requestBody.tools, undefined);
+            assert.ok(
+                requestBody.messages.some(
+                    (m: any) => m.role === "system" && m.content.includes("<akkco_tool_call>"),
+                ),
+            );
+            assert.match(output, /Tool: read_file/);
+            assert.match(output, /✔ completed/);
+        } finally {
+            cp.kill();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    },
+);
+
+test("CLI respects explicit AKKCO_TOOL_MODE=native", { timeout: 10000 }, async () => {
+    let requestBody: any;
+    const server = http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (d) => (body += d.toString()));
+        req.on("end", () => {
+            requestBody = JSON.parse(body);
+            res.writeHead(200, { "Content-Type": "text/event-stream" });
+            res.write(
+                `data: ${JSON.stringify({
+                    choices: [
+                        {
+                            delta: {
+                                tool_calls: [
+                                    {
+                                        index: 0,
+                                        id: "read-call",
+                                        type: "function",
+                                        function: {
+                                            name: "read_file",
+                                            arguments: '{"path":"apps/cli/package.json"}',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                })}\n\n`,
+            );
+            res.end("data: [DONE]\n\n");
+        });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as any;
+
+    const cp = spawn(tsxBin, [cliEntry], {
+        cwd: path.resolve(__dirname, "../../.."),
+        env: {
+            ...process.env,
+            AKKCO_TOOL_MODE: "native",
+            AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let output = "";
+    cp.stdout.on("data", (d) => (output += d.toString()));
+    cp.stderr.on("data", (d) => (output += d.toString()));
+
+    try {
+        cp.stdin.end("inspect CLI\n");
+        const exitCode = await waitForExit(cp);
+        assert.strictEqual(exitCode, 0);
+        assert.ok(Array.isArray(requestBody.tools) && requestBody.tools.length > 0);
+        assert.match(output, /Tool: read_file/);
+        assert.match(output, /✔ completed/);
+    } finally {
+        cp.kill();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
 });
 
 test(
     "CLI reports clear configuration error on invalid AKKCO_MAX_TOOL_ITERATIONS",
     { timeout: 10000 },
     async () => {
-        for (const invalidVal of ["invalid", "-5", "0", "1.5"]) {
+        for (const invalidVal of ["invalid", "-5", "0", "1.5", "Infinity"]) {
             const cp = spawn(tsxBin, [cliEntry], {
                 env: { ...process.env, AKKCO_MAX_TOOL_ITERATIONS: invalidVal },
                 stdio: ["pipe", "pipe", "pipe"],
@@ -434,3 +576,102 @@ test(
         }
     },
 );
+
+test(
+    "CLI enforces valid AKKCO_MAX_TOOL_ITERATIONS injection end-to-end",
+    { timeout: 10000 },
+    async () => {
+        let requestCount = 0;
+        const server = http.createServer((_req, res) => {
+            requestCount++;
+            res.writeHead(200, { "Content-Type": "text/event-stream" });
+            res.write(
+                `data: ${JSON.stringify({
+                    choices: [
+                        {
+                            delta: {
+                                content: `<akkco_tool_call>{"name":"read_file","arguments":{"path":"apps/cli/package.json"}}</akkco_tool_call>`,
+                            },
+                        },
+                    ],
+                })}\n\n`,
+            );
+            res.end("data: [DONE]\n\n");
+        });
+
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address() as any;
+
+        const cp = spawn(tsxBin, [cliEntry], {
+            cwd: path.resolve(__dirname, "../../.."),
+            env: {
+                ...process.env,
+                AKKCO_MAX_TOOL_ITERATIONS: "1",
+                AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+            },
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        let output = "";
+        cp.stdout.on("data", (d) => (output += d.toString()));
+        cp.stderr.on("data", (d) => (output += d.toString()));
+
+        try {
+            cp.stdin.end("run tool loop\n");
+            const exitCode = await waitForExit(cp);
+            assert.strictEqual(exitCode, 0);
+            assert.match(output, /Tool: read_file/);
+            assert.match(output, /Error: Maximum tool iterations exceeded/);
+            assert.strictEqual(requestCount, 2);
+        } finally {
+            cp.kill();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    },
+);
+
+test("createCliController has no environment dependency and accepts reliabilityOptions directly", async () => {
+    const originalMaxIterations = process.env.AKKCO_MAX_TOOL_ITERATIONS;
+    const originalToolMode = process.env.AKKCO_TOOL_MODE;
+
+    try {
+        process.env.AKKCO_MAX_TOOL_ITERATIONS = "invalid_not_a_number";
+        process.env.AKKCO_TOOL_MODE = "invalid_mode";
+
+        const dummyProvider: ModelProvider = {
+            id: "dummy",
+            stream: () => ({
+                async *[Symbol.asyncIterator]() {
+                    yield { type: "text", content: "pong" };
+                },
+            }),
+        };
+        const registry = createToolRegistry();
+
+        const controllerWithoutOptions = createCliController({
+            provider: dummyProvider,
+            toolRegistry: registry,
+        });
+        assert.ok(controllerWithoutOptions);
+        controllerWithoutOptions.dispose();
+
+        const controllerWithOptions = createCliController({
+            provider: dummyProvider,
+            toolRegistry: registry,
+            reliabilityOptions: { maxToolIterations: 3 },
+        });
+        assert.ok(controllerWithOptions);
+        controllerWithOptions.dispose();
+    } finally {
+        if (originalMaxIterations === undefined) {
+            delete process.env.AKKCO_MAX_TOOL_ITERATIONS;
+        } else {
+            process.env.AKKCO_MAX_TOOL_ITERATIONS = originalMaxIterations;
+        }
+        if (originalToolMode === undefined) {
+            delete process.env.AKKCO_TOOL_MODE;
+        } else {
+            process.env.AKKCO_TOOL_MODE = originalToolMode;
+        }
+    }
+});

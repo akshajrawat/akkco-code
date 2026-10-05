@@ -3,19 +3,14 @@ import { createTextToolCompatibilityProvider, OpenAICompatibleProvider } from "@
 import { createRepositoryTools, createToolRegistry } from "@akkco/tools";
 import { readFile } from "node:fs/promises";
 import process, { stdin, stdout } from "node:process";
+import { parseMaxToolIterations, parseToolMode } from "./config.js";
 import { runPlainCli } from "./plain-cli.js";
 import { createCliController } from "./state/cli-controller.js";
 import type { CliMetadata } from "./state/types.js";
 
 const main = async () => {
-    const toolMode = process.env.AKKCO_TOOL_MODE ?? "native";
-    if (toolMode !== "native" && toolMode !== "compatibility") {
-        console.error(
-            `Invalid AKKCO_TOOL_MODE: "${toolMode}". Supported values are "native" and "compatibility".\n`,
-        );
-        process.exitCode = 1;
-        return;
-    }
+    const toolMode = parseToolMode(process.env.AKKCO_TOOL_MODE);
+    const maxToolIterations = parseMaxToolIterations(process.env.AKKCO_MAX_TOOL_ITERATIONS);
 
     const model = process.env.AKKCO_MODEL ?? "qwen2.5-coder:3b";
     let nativeProvider: ModelProvider;
@@ -44,6 +39,7 @@ const main = async () => {
     const controller = createCliController({
         provider,
         toolRegistry: createToolRegistry(createRepositoryTools(process.cwd())),
+        reliabilityOptions: maxToolIterations !== undefined ? { maxToolIterations } : undefined,
     });
 
     const manifest = JSON.parse(

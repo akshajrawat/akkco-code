@@ -13,11 +13,22 @@ export class DeterministicTestProvider implements ModelProvider {
 
     stream = (request: ModelRequest): AsyncIterable<ModelEvent> => {
         const lastUserMessage = request.items
-            .filter((item): item is ModelMessage => item.type === "message" && item.role === "user")
+            .filter(
+                (item): item is ModelMessage =>
+                    item.type === "message" &&
+                    item.role === "user" &&
+                    !item.content.startsWith("<akkco_tool_result"),
+            )
             .at(-1);
 
         const content = lastUserMessage?.content?.trim() ?? "";
-        const hasToolResult = request.items.some((item) => item.type === "tool_result");
+        const hasToolResult = request.items.some(
+            (item) =>
+                item.type === "tool_result" ||
+                (item.type === "message" &&
+                    item.role === "user" &&
+                    item.content.startsWith("<akkco_tool_result")),
+        );
 
         return {
             async *[Symbol.asyncIterator]() {

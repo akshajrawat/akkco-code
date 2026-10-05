@@ -55,7 +55,7 @@ ModelEvent
 Runtime
 ```
 
-#### Compatibility Mode (`AKKCO_TOOL_MODE=compatibility`)
+#### Compatibility Mode (`AKKCO_TOOL_MODE=compatibility`, default)
 
 ```
 Provider
@@ -69,7 +69,7 @@ ModelToolCallEvent
 Runtime
 ```
 
-In compatibility mode, the wrapper intercepts requests before invoking the wrapped provider:
+In compatibility mode (the CLI default to match `qwen2.5-coder:3b`), the wrapper intercepts requests before invoking the wrapped provider:
 
 - Injects an ephemeral system instruction defining available tools and the `<akkco_tool_call>` protocol.
 - Strips native `request.tools` (`tools: undefined`) to prevent native and textual tool protocols competing.
@@ -79,9 +79,11 @@ In compatibility mode, the wrapper intercepts requests before invoking the wrapp
 - Buffers and validates exact `<akkco_tool_call>` envelopes and emits standard `ModelToolCallEvent`s to Runtime.
 - Runtime remains completely provider-neutral and unaware whether events originated natively or via compatibility.
 
+Explicit `AKKCO_TOOL_MODE=native` can be selected when using models/providers with reliable native structured tool calling.
+
 ## Terminal UI
 
-`apps/cli/src/index.ts` validates `AKKCO_TOOL_MODE`, parses `AKKCO_MAX_TOOL_ITERATIONS` as a positive integer (reporting a clear configuration error if invalid), constructs the provider and repository tool registry, reads the CLI version using `node:fs/promises`, and initializes the CLI controller. `AKKCO_BASE_URL`, `AKKCO_MODEL`, and `AKKCO_API_KEY` retain their existing defaults and behavior. The domain packages have no Ink or React dependency.
+CLI configuration and environment variable parsing live strictly in the composition and bootstrap layer (`apps/cli/src/config.ts` and `apps/cli/src/index.ts`). `config.ts` validates `AKKCO_TOOL_MODE` (defaulting to `"compatibility"` for `qwen2.5-coder:3b`) and parses `AKKCO_MAX_TOOL_ITERATIONS` as a positive integer (reporting a clear configuration error if invalid). `index.ts` resolves these options and injects pure `reliabilityOptions` into `createCliController`. Neither `createCliController` nor internal packages (`@akkco/core`, `@akkco/models`, `@akkco/providers`, `@akkco/tools`) have any dependency on `process.env`. `AKKCO_BASE_URL`, `AKKCO_MODEL`, and `AKKCO_API_KEY` retain their existing defaults and behavior. The domain packages have no Ink or React dependency.
 
 The controller in `state/cli-controller.ts` coordinates a `Session`, the command subsystem, an active generation's `AbortController`, and CLI presentation state. Slash-command handling is factored out into a dedicated subsystem under `commands/`:
 

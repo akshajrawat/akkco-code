@@ -1,4 +1,4 @@
-import { createAkkcoRuntime, type RuntimeReliabilityOptions, Session } from "@akkco/core";
+import { createAkkcoRuntime, Session } from "@akkco/core";
 import { toModelTools } from "@akkco/tools";
 import {
     type CommandContext,
@@ -12,20 +12,6 @@ import type {
     CliViewState,
     HistoryItem,
 } from "./types.js";
-
-export const parseMaxToolIterations = (envValue?: string): number | undefined => {
-    if (envValue === undefined) {
-        return undefined;
-    }
-    const trimmed = envValue.trim();
-    const parsed = Number(trimmed);
-    if (!trimmed || !Number.isInteger(parsed) || parsed <= 0) {
-        throw new Error(
-            `Invalid AKKCO_MAX_TOOL_ITERATIONS: "${envValue}". Must be a finite positive integer.`,
-        );
-    }
-    return parsed;
-};
 
 export const createCliController = ({
     provider,
@@ -100,16 +86,6 @@ export const createCliController = ({
         });
     };
 
-    const envMaxToolIterations = parseMaxToolIterations(process.env.AKKCO_MAX_TOOL_ITERATIONS);
-    const resolvedReliabilityOptions: RuntimeReliabilityOptions = {
-        ...reliabilityOptions,
-        ...(reliabilityOptions?.maxToolIterations !== undefined
-            ? { maxToolIterations: reliabilityOptions.maxToolIterations }
-            : envMaxToolIterations !== undefined
-              ? { maxToolIterations: envMaxToolIterations }
-              : {}),
-    };
-
     const session = new Session(
         createAkkcoRuntime(
             provider,
@@ -122,7 +98,7 @@ export const createCliController = ({
                     return toolRegistry.execute(name, input);
                 },
             },
-            resolvedReliabilityOptions,
+            reliabilityOptions,
         ),
     );
 
