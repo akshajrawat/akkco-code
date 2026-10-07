@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import test from "node:test";
 import { createAkkcoRuntime, createAkkcoSession, Session } from "../src/index.js";
+import { AGENT_POLICY } from "../src/context/context-compiler.js";
 import type { ModelEvent, ModelProvider, ModelRequest } from "@akkco/models";
 
 test("send() without iteration does not mutate transcript", () => {
@@ -262,10 +263,12 @@ test("next generation after an interruption receives compiled interruption conte
     assert.strictEqual(recordedRequests.length, 2);
     // Turn 1 request
     assert.deepStrictEqual(recordedRequests[0].items, [
+        { type: "message", role: "system", content: AGENT_POLICY },
         { type: "message", role: "user", content: "write code" },
     ]);
     // Turn 2 request has compiled interruption context
     assert.deepStrictEqual(recordedRequests[1].items, [
+        { type: "message", role: "system", content: AGENT_POLICY },
         { type: "message", role: "user", content: "write code" },
         { type: "message", role: "assistant", content: "const x = 1;" },
         {
@@ -310,6 +313,7 @@ test("next generation after failure receives compiled failure context", async ()
 
     assert.strictEqual(recordedRequests.length, 2);
     assert.deepStrictEqual(recordedRequests[1].items, [
+        { type: "message", role: "system", content: AGENT_POLICY },
         { type: "message", role: "user", content: "run step" },
         { type: "message", role: "assistant", content: "step 1" },
         {
@@ -319,6 +323,52 @@ test("next generation after failure receives compiled failure context", async ()
         },
         { type: "message", role: "user", content: "retry" },
     ]);
+});
+
+test("tiny agent policy is present once in native requests and not duplicated across turns", async () => {
+    const recordedRequests: ModelRequest[] = [];
+    const provider: ModelProvider = {
+        id: "test",
+        stream: (request: ModelRequest) => {
+            recordedRequests.push(request);
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield { type: "text", content: "Hello!" } satisfies ModelEvent;
+                },
+            };
+        },
+    };
+    const runtime = createAkkcoRuntime(provider);
+    const session = new Session(runtime);
+
+    for await (const _ of session.send("first prompt")) {
+    }
+    for await (const _ of session.send("second prompt")) {
+    }
+
+    assert.strictEqual(recordedRequests.length, 2);
+
+    // Turn 1: policy is present once at index 0
+    const turn1PolicyItems = recordedRequests[0].items.filter(
+        (it) => it.type === "message" && it.role === "system" && it.content === AGENT_POLICY,
+    );
+    assert.strictEqual(turn1PolicyItems.length, 1);
+    assert.deepStrictEqual(recordedRequests[0].items[0], {
+        type: "message",
+        role: "system",
+        content: AGENT_POLICY,
+    });
+
+    // Turn 2: policy is present once at index 0, not duplicated
+    const turn2PolicyItems = recordedRequests[1].items.filter(
+        (it) => it.type === "message" && it.role === "system" && it.content === AGENT_POLICY,
+    );
+    assert.strictEqual(turn2PolicyItems.length, 1);
+    assert.deepStrictEqual(recordedRequests[1].items[0], {
+        type: "message",
+        role: "system",
+        content: AGENT_POLICY,
+    });
 });
 
 test("external callers cannot mutate transcript", async () => {

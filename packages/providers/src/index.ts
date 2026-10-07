@@ -6,4 +6,3 @@ export {
     createTextToolCompatibilityProvider,
     TextToolCompatibilityProvider,
 } from "./compatibility/text-tool-provider.js";
-export { COMPATIBILITY_REPAIR_INSTRUCTION } from "./compatibility/text-tool-protocol.js";

@@ -9,7 +9,7 @@ const listFilesInputSchema = z.object({
         .string()
         .optional()
         .describe(
-            "Directory path to list (expects a directory, not a file). Defaults to repository root.",
+            "Repository-relative directory path to list (expects a directory, not a file). Defaults to repository root.",
         ),
 });
 

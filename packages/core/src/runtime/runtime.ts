@@ -10,6 +10,7 @@ import type {
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
 import {
     AgentLoopError,
+    detectRepeatedToolCycle,
     getToolCallSignature,
     validateReliabilityOptions,
     type RuntimeReliabilityOptions,
@@ -44,6 +45,10 @@ export const createAkkcoRuntime = (
                 let lastSignature: string | undefined;
                 let repetitionCount = 0;
                 let repetitionWarned = false;
+
+                const recentSignatures: string[] = [];
+                let cycleWarned = false;
+                let warnedCallSignature: string | undefined;
 
                 while (true) {
                     throwIfAborted(request.signal);
@@ -143,6 +148,60 @@ export const createAkkcoRuntime = (
                             lastSignature = signature;
                             repetitionCount = 1;
                             repetitionWarned = false;
+                        }
+
+                        const cycleResult = detectRepeatedToolCycle(recentSignatures, signature);
+
+                        if (
+                            cycleResult.isCycle ||
+                            (cycleWarned && signature === warnedCallSignature)
+                        ) {
+                            if (cycleWarned) {
+                                throwIfAborted(request.signal);
+                                throw new AgentLoopError(
+                                    "repeated_tool_cycle",
+                                    "Agent loop terminated: repeated tool strategy cycle detected without strategy change.",
+                                );
+                            }
+
+                            cycleWarned = true;
+                            warnedCallSignature = signature;
+                            recentSignatures.push(signature);
+                            if (recentSignatures.length > 30) {
+                                recentSignatures.shift();
+                            }
+
+                            const warningMessage =
+                                "Repeated tool strategy: pattern of recent tool calls is repeating. You must change your strategy and use existing evidence or choose another approach.";
+
+                            const resultItem: ModelToolResult = {
+                                type: "tool_result",
+                                callId: call.id,
+                                content: warningMessage,
+                                isError: true,
+                            };
+                            workingItems.push(resultItem);
+
+                            yield {
+                                type: "tool_execution",
+                                callId: call.id,
+                                toolName: call.name,
+                                arguments: call.arguments,
+                                error: warningMessage,
+                                status: "failed",
+                                durationMs: 0,
+                            } satisfies RuntimeToolExecutionEvent;
+
+                            continue;
+                        } else {
+                            if (cycleWarned) {
+                                cycleWarned = false;
+                                warnedCallSignature = undefined;
+                            }
+                            recentSignatures.push(signature);
+                            if (recentSignatures.length > 30) {
+                                recentSignatures.shift();
+                            }
                         }
 
                         if (!toolHost) {

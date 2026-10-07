@@ -1,5 +1,8 @@
 export type AgentLoopStopReason =
-    "max_tool_iterations" | "repeated_tool_call" | "consecutive_tool_errors";
+    | "max_tool_iterations"
+    | "repeated_tool_call"
+    | "repeated_tool_cycle"
+    | "consecutive_tool_errors";
 
 const getDefaultMessageForReason = (reason: AgentLoopStopReason): string => {
     switch (reason) {
@@ -7,6 +10,8 @@ const getDefaultMessageForReason = (reason: AgentLoopStopReason): string => {
             return "Maximum tool iterations exceeded";
         case "repeated_tool_call":
             return "Agent loop terminated: repeated tool call detected without strategy change";
+        case "repeated_tool_cycle":
+            return "Agent loop terminated: repeated tool strategy cycle detected without strategy change";
         case "consecutive_tool_errors":
             return "Agent loop terminated: consecutive tool error limit reached";
     }
@@ -125,3 +130,48 @@ export const validateReliabilityOptions = (
 };
 
 export const resolveReliabilityOptions = validateReliabilityOptions;
+
+export interface CycleDetectionResult {
+    isCycle: boolean;
+    cycleLength?: number;
+    pattern?: string[];
+}
+
+export const detectRepeatedToolCycle = (
+    history: readonly string[],
+    newSignature: string,
+    minCycleLength = 2,
+    maxCycleLength = 8,
+): CycleDetectionResult => {
+    const candidate = [...history, newSignature];
+    const maxL = Math.min(maxCycleLength, Math.floor(candidate.length / 2));
+
+    for (let L = minCycleLength; L <= maxL; L++) {
+        const lastSlice = candidate.slice(-L);
+        const prevSlice = candidate.slice(-2 * L, -L);
+
+        // Require at least two distinct elements in the cycle so that sequences
+        // of purely identical calls (e.g. A A A) are handled by repeatedToolCallLimit
+        if (new Set(lastSlice).size < 2) {
+            continue;
+        }
+
+        let isMatch = true;
+        for (let i = 0; i < L; i++) {
+            if (lastSlice[i] !== prevSlice[i]) {
+                isMatch = false;
+                break;
+            }
+        }
+
+        if (isMatch) {
+            return {
+                isCycle: true,
+                cycleLength: L,
+                pattern: lastSlice,
+            };
+        }
+    }
+
+    return { isCycle: false };
+};

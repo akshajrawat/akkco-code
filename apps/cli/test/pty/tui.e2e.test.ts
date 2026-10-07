@@ -471,7 +471,11 @@ for (const [columns, rows] of [
             assert.equal(screen.lines()[responseRow]?.trim(), "Starting wait task...");
             assert.match(screen.lines().at(-2)!, /Thinking/);
             await tui.key("ctrlC");
-            await tui.waitFor((s) => s.text().includes("Cancelled"));
+            await tui.waitFor(
+                (s) =>
+                    s.text().includes("Cancelled") &&
+                    s.lines()[responseRow]?.trim() === "Starting wait task...",
+            );
             screen = await tui.screen();
             assert.equal(
                 screen.lines()[responseRow]?.trim(),

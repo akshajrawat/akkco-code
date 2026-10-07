@@ -1,5 +1,7 @@
 export type ToolMode = "native" | "compatibility";
 
+export const DEFAULT_MODEL = "qwen2.5-coder:7b";
+
 export const parseToolMode = (envValue?: string): ToolMode => {
     if (envValue === undefined) {
         return "compatibility";

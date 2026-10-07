@@ -161,3 +161,46 @@ test("search_text rejects outside symlink", async () => {
         await cleanup();
     }
 });
+
+test("search_text rejects an absolute outside path", async () => {
+    const { repoRoot, outsideDir, cleanup } = await setupTestRepo();
+    try {
+        const tool = createSearchTextTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ query: "secret", path: outsideDir });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});
+
+test("search_text rejects an absolute path within repository root", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const tool = createSearchTextTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ query: "find_me", path: repoRoot });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});
+
+test("search_text rejects Windows-style absolute drive path", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const tool = createSearchTextTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ query: "find_me", path: "C:\\repo" });
+        }, /Repository path must be relative/i);
+
+        await assert.rejects(async () => {
+            await tool.execute({ query: "find_me", path: "D:/repo" });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});

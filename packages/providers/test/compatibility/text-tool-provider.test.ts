@@ -9,10 +9,8 @@ import type {
     ModelTool,
     ModelToolCall,
 } from "@akkco/models";
-import {
-    COMPATIBILITY_REPAIR_INSTRUCTION,
-    createTextToolCompatibilityProvider,
-} from "../../src/index.js";
+import { createTextToolCompatibilityProvider } from "../../src/index.js";
+import { COMPATIBILITY_REPAIR_INSTRUCTION } from "../../src/compatibility/text-tool-protocol.js";
 
 const sampleTool: ModelTool = {
     name: "read_file",
@@ -248,24 +246,17 @@ test("plain JSON remains ordinary text", async () => {
     assert.strictEqual(events[0].content, jsonText);
 });
 
-// prose before envelope triggers recovery and emits repaired tool call
-test("prose before envelope triggers recovery and emits repaired tool call", async () => {
-    const mock = new MultiTurnMockModelProvider([
-        async function* () {
+// prose before valid terminal envelope is valid without recovery
+test("prose before valid terminal envelope is valid without recovery", async () => {
+    const mock = new MockModelProvider((_req) => ({
+        async *[Symbol.asyncIterator]() {
             yield {
                 type: "text",
                 content:
                     'Let\'s search for that.\n\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
             };
         },
-        async function* () {
-            yield {
-                type: "text",
-                content:
-                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
-            };
-        },
-    ]);
+    }));
 
     const compat = createTextToolCompatibilityProvider(mock);
     const events = await collectEvents(compat, {
@@ -273,11 +264,12 @@ test("prose before envelope triggers recovery and emits repaired tool call", asy
         tools: [sampleTool],
     });
 
-    assert.strictEqual(events.length, 1);
-    assert.strictEqual(events[0].type, "tool_call");
-    assert.strictEqual(events[0].name, "read_file");
-    assert.deepStrictEqual(events[0].arguments, { path: "a.ts" });
-    assert.strictEqual(mock.requests.length, 2);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(events[0].type, "text");
+    assert.strictEqual((events[0] as any).content, "Let's search for that.\n\n");
+    assert.strictEqual(events[1].type, "tool_call");
+    assert.strictEqual((events[1] as any).name, "read_file");
+    assert.deepStrictEqual((events[1] as any).arguments, { path: "a.ts" });
 });
 
 // prose after envelope triggers recovery and emits repaired tool call
@@ -478,7 +470,7 @@ test("successful repair verifies repair prompt and non-corrupted neutral history
             yield {
                 type: "text",
                 content:
-                    'Sure!\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nSure!',
             };
         },
         async function* () {
@@ -512,7 +504,7 @@ test("successful repair verifies repair prompt and non-corrupted neutral history
     assert.strictEqual(assistantMessage.role, "assistant");
     assert.strictEqual(
         assistantMessage.content,
-        'Sure!\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+        '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nSure!',
     );
     assert.strictEqual(correctiveMessage.role, "user");
     assert.strictEqual(correctiveMessage.content, COMPATIBILITY_REPAIR_INSTRUCTION);
@@ -525,14 +517,14 @@ test("repeated violation terminates with clear compatibility protocol error with
             yield {
                 type: "text",
                 content:
-                    'Prose before envelope:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nProse after envelope',
             };
         },
         async function* () {
             yield {
                 type: "text",
                 content:
-                    'Still has prose before envelope:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nStill has prose after envelope',
             };
         },
     ]);
@@ -560,7 +552,7 @@ test("repair abandonment followed by normal prose is accepted as final prose", a
             yield {
                 type: "text",
                 content:
-                    'Let\'s search.\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nLet\'s search.',
             };
         },
         async function* () {
@@ -625,7 +617,7 @@ test("cancellation before repair does not start repair turn and throws AbortErro
             yield {
                 type: "text",
                 content:
-                    'prose before\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nprose after',
             };
             // Abort right as turn 1 finishes
             controller.abort();
@@ -670,7 +662,7 @@ test("cancellation during repair throws AbortError without protocol error", asyn
             yield {
                 type: "text",
                 content:
-                    'prose before\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+                    '<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>\nprose after',
             };
         },
         async function* () {
@@ -738,15 +730,13 @@ test("malformed tool is never executed or emitted", async () => {
         async function* () {
             yield {
                 type: "text",
-                content:
-                    'I will run this tool:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"malformed.ts"}}</akkco_tool_call>',
+                content: "<akkco_tool_call>{invalid_json:}</akkco_tool_call>",
             };
         },
         async function* () {
             yield {
                 type: "text",
-                content:
-                    'Still not valid:\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"malformed.ts"}}</akkco_tool_call>',
+                content: "<akkco_tool_call>{still_invalid:}</akkco_tool_call>",
             };
         },
     ]);
@@ -1606,4 +1596,128 @@ test("normal streaming behavior remains intact", async () => {
         events,
         chunks.map((c) => ({ type: "text", content: c })),
     );
+});
+
+// agent policy survives compatibility transformation
+test("tiny agent policy survives compatibility transformation and maintains order", async () => {
+    let capturedRequest: ModelRequest | undefined;
+    const mock = new MockModelProvider((req) => {
+        capturedRequest = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "ok" };
+            },
+        };
+    });
+
+    const agentPolicy =
+        "Repository behavior:\n- Use repository tools only when the request depends on repository contents.\n- Base repository-specific claims on tool evidence rather than guessing.\n- After useful search results, inspect relevant files before broadening the search.\n- Stop once enough evidence exists to answer.";
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    await collectEvents(compat, {
+        items: [
+            { type: "message", role: "system", content: agentPolicy },
+            { type: "message", role: "user", content: "Find files" },
+        ],
+        tools: [sampleTool],
+    });
+
+    assert.ok(capturedRequest);
+    // In compatibility mode, items[0] is the compatibility tool instructions system message,
+    // items[1] is the agent policy message (survived intact),
+    // items[2] is the user message
+    assert.strictEqual(capturedRequest.items.length, 3);
+    const item0 = capturedRequest.items[0] as ModelMessage;
+    assert.strictEqual(item0.role, "system");
+    assert.match(item0.content, /<akkco_tool_call>/);
+    assert.deepStrictEqual(capturedRequest.items[1], {
+        type: "message",
+        role: "system",
+        content: agentPolicy,
+    });
+    assert.deepStrictEqual(capturedRequest.items[2], {
+        type: "message",
+        role: "user",
+        content: "Find files",
+    });
+});
+
+// fragmented prose and envelope streaming emits pre-tool prose in real time and suppresses envelope
+test("fragmented prose and envelope streaming emits pre-tool prose in real time and suppresses envelope", async () => {
+    const mock = new MockModelProvider((_req) => ({
+        async *[Symbol.asyncIterator]() {
+            yield { type: "text", content: "Let's search " };
+            yield { type: "text", content: "for that file:\n\n" };
+            yield { type: "text", content: "<akk" };
+            yield { type: "text", content: "co_tool_call>" };
+            yield {
+                type: "text",
+                content: '\n{"name":"read_file","arguments":{"path":"a.ts"}}\n',
+            };
+            yield { type: "text", content: "</akkco_tool_call>" };
+        },
+    }));
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(events.length, 3);
+    assert.deepStrictEqual(events[0], { type: "text", content: "Let's search " });
+    assert.deepStrictEqual(events[1], { type: "text", content: "for that file:\n\n" });
+    assert.strictEqual(events[2].type, "tool_call");
+    assert.strictEqual((events[2] as any).name, "read_file");
+    assert.deepStrictEqual((events[2] as any).arguments, { path: "a.ts" });
+});
+
+// pre-tool text emitted exactly once and tool event emitted exactly once
+test("pre-tool text emitted exactly once and tool event emitted exactly once", async () => {
+    const mock = new MockModelProvider((_req) => ({
+        async *[Symbol.asyncIterator]() {
+            yield {
+                type: "text",
+                content:
+                    'Checking repository structure...\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</akkco_tool_call>',
+            };
+        },
+    }));
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read" }],
+        tools: [sampleTool],
+    });
+
+    const textEvents = events.filter((e) => e.type === "text");
+    const toolCallEvents = events.filter((e) => e.type === "tool_call");
+
+    assert.strictEqual(textEvents.length, 1);
+    assert.strictEqual((textEvents[0] as any).content, "Checking repository structure...\n");
+    assert.strictEqual(toolCallEvents.length, 1);
+    assert.strictEqual((toolCallEvents[0] as any).name, "read_file");
+    assert.deepStrictEqual((toolCallEvents[0] as any).arguments, { path: "a.ts" });
+});
+
+// fenced JSON never executes and remains ordinary text
+test("fenced JSON never executes and remains ordinary text", async () => {
+    const fencedJson = '```json\n{"name":"read_file","arguments":{"path":"a.ts"}}\n```';
+    const mock = new MockModelProvider((_req) => ({
+        async *[Symbol.asyncIterator]() {
+            yield { type: "text", content: fencedJson };
+        },
+    }));
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const events = await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "read" }],
+        tools: [sampleTool],
+    });
+
+    const toolCallEvents = events.filter((e) => (e as any).type === "tool_call");
+    assert.strictEqual(toolCallEvents.length, 0);
+    assert.ok(events.every((e) => e.type === "text"));
+    const fullText = events.map((e) => (e as any).content).join("");
+    assert.strictEqual(fullText, fencedJson);
 });

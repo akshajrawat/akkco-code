@@ -118,3 +118,46 @@ test("list_files rejects outside symlink", async () => {
         await cleanup();
     }
 });
+
+test("list_files rejects an absolute outside path", async () => {
+    const { repoRoot, outsideDir, cleanup } = await setupTestRepo();
+    try {
+        const tool = createListFilesTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: outsideDir });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});
+
+test("list_files rejects an absolute path within repository root", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const tool = createListFilesTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: repoRoot });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});
+
+test("list_files rejects Windows-style absolute drive path", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const tool = createListFilesTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: "C:\\repo" });
+        }, /Repository path must be relative/i);
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: "D:/repo" });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});

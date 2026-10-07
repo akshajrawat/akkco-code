@@ -26,8 +26,8 @@ export const formatToolsInstruction = (tools: ModelTool[]) => {
         "2. You must only call tools that are listed above.",
         "3. Emit exactly ONE tool call per assistant turn. Never emit multiple <akkco_tool_call> envelopes in one response.",
         "4. If multiple tools or multiple searches are needed, call only the first one. Wait for the tool result, then request the next tool in the following model turn.",
-        "5. To call a tool, your entire response must consist solely of the <akkco_tool_call> envelope.",
-        "6. Do NOT include any prose, explanation, or commentary before or after the envelope.",
+        "5. You may include brief explanation or commentary before the <akkco_tool_call> envelope, but the <akkco_tool_call> envelope must be the final content of your response.",
+        "6. Do NOT include any prose, explanation, or commentary after the envelope. Once you request a tool, you must wait for the tool result.",
         "7. Do NOT wrap the envelope in Markdown code fences (e.g. no ```xml or ```json).",
         "8. Do NOT print, mention, or explain the tool protocol to the user in conversational output.",
         '9. When using search_text: path is a repository-relative file or directory; use "." or omit path for repository-wide search. Glob syntax such as "*" is NOT supported.',
@@ -67,13 +67,20 @@ export const transformRequestHistoryForCompatibility = (
             case "message":
                 transformed.push({ ...item });
                 break;
-            case "tool_call":
-                transformed.push({
-                    type: "message",
-                    role: "assistant",
-                    content: formatToolCallHistory(item),
-                });
+            case "tool_call": {
+                const formattedCall = formatToolCallHistory(item);
+                const lastItem = transformed[transformed.length - 1];
+                if (lastItem && lastItem.type === "message" && lastItem.role === "assistant") {
+                    lastItem.content = `${lastItem.content.trimEnd()}\n\n${formattedCall}`;
+                } else {
+                    transformed.push({
+                        type: "message",
+                        role: "assistant",
+                        content: formattedCall,
+                    });
+                }
                 break;
+            }
             case "tool_result":
                 transformed.push({
                     type: "message",
@@ -99,50 +106,59 @@ export const hasCompatibilityToolIntent = (text: string): boolean => {
 export interface ParsedToolCall {
     name: string;
     arguments: unknown;
+    preToolText?: string;
 }
 
 export const parseCompatibilityToolCall = (
     text: string,
     advertisedTools: ModelTool[],
 ): ParsedToolCall => {
-    const trimmed = text.trim();
-
-    if (!trimmed.includes(TOOL_CALL_OPEN_TAG)) {
+    if (!text.includes(TOOL_CALL_OPEN_TAG)) {
         throw new Error(
             "Compatibility tool protocol error: response must be enclosed in <akkco_tool_call> envelope",
         );
     }
 
-    if (!trimmed.includes(TOOL_CALL_CLOSE_TAG)) {
+    if (!text.includes(TOOL_CALL_CLOSE_TAG)) {
         throw new Error(
             "Compatibility tool protocol error: unclosed <akkco_tool_call> envelope; closing tag is missing.",
         );
     }
 
-    const openCount = trimmed.split(TOOL_CALL_OPEN_TAG).length - 1;
-    const closeCount = trimmed.split(TOOL_CALL_CLOSE_TAG).length - 1;
+    const openCount = text.split(TOOL_CALL_OPEN_TAG).length - 1;
+    const closeCount = text.split(TOOL_CALL_CLOSE_TAG).length - 1;
     if (openCount > 1 || closeCount > 1) {
         throw new Error(
             "Compatibility tool protocol error: model emitted multiple tool calls in one turn; only one is supported.",
         );
     }
 
-    const openIndex = trimmed.indexOf(TOOL_CALL_OPEN_TAG);
-    if (openIndex > 0) {
+    const openIndex = text.indexOf(TOOL_CALL_OPEN_TAG);
+    const closeIndex = text.indexOf(TOOL_CALL_CLOSE_TAG);
+
+    if (closeIndex < openIndex) {
         throw new Error(
-            "Compatibility tool protocol error: model emitted unexpected text before tool call envelope; no prose allowed outside envelope.",
+            "Compatibility tool protocol error: unclosed or misplaced <akkco_tool_call> envelope.",
         );
     }
 
-    const closeIndex = trimmed.indexOf(TOOL_CALL_CLOSE_TAG);
-    const afterClose = trimmed.slice(closeIndex + TOOL_CALL_CLOSE_TAG.length);
+    const afterClose = text.slice(closeIndex + TOOL_CALL_CLOSE_TAG.length);
     if (afterClose.trim() !== "") {
         throw new Error(
             "Compatibility tool protocol error: model emitted unexpected text after tool call envelope; no prose allowed outside envelope.",
         );
     }
 
-    const body = trimmed.slice(openIndex + TOOL_CALL_OPEN_TAG.length, closeIndex).trim();
+    const preToolText = text.slice(0, openIndex);
+    const fenceCount = preToolText.split("```").length - 1;
+    const isFenced = fenceCount % 2 !== 0 || /```[a-zA-Z0-9_-]*\s*$/.test(preToolText);
+    if (isFenced) {
+        throw new Error(
+            "Compatibility tool protocol error: tool call envelope must not be wrapped in Markdown code fences.",
+        );
+    }
+
+    const body = text.slice(openIndex + TOOL_CALL_OPEN_TAG.length, closeIndex).trim();
 
     let parsed: unknown;
     try {
@@ -179,6 +195,7 @@ export const parseCompatibilityToolCall = (
     return {
         name: toolName,
         arguments: args,
+        preToolText: preToolText.length > 0 ? preToolText : undefined,
     };
 };
 

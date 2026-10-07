@@ -13,7 +13,7 @@ const searchTextInputSchema = z.object({
         .string()
         .optional()
         .describe(
-            "Search root or directory path to search recursively within (path is a search root/directory). Defaults to repository root.",
+            "Repository-relative search root or directory path to search recursively within (path is a search root/directory). Defaults to repository root.",
         ),
 });
 

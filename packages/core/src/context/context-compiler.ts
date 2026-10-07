@@ -1,8 +1,37 @@
 import type { ModelItem } from "@akkco/models";
 import type { TranscriptItem } from "../transcript/types.js";
 
-export const compileContext = (transcript: TranscriptItem[]): ModelItem[] => {
+export const AGENT_POLICY = `Repository behavior:
+- Use repository tools only when the request depends on repository contents.
+- Base repository-specific claims on tool evidence rather than guessing.
+- After useful search results, inspect relevant files before broadening the search.
+- Stop once enough evidence exists to answer.`;
+
+export interface CompileContextOptions {
+    includePolicy?: boolean;
+    policy?: string;
+}
+
+export const compileContext = (
+    transcript: TranscriptItem[],
+    options?: CompileContextOptions,
+): ModelItem[] => {
     const items: ModelItem[] = [];
+
+    const includePolicy = options?.includePolicy ?? true;
+    const policyText = options?.policy ?? AGENT_POLICY;
+
+    const alreadyHasPolicy = transcript.some(
+        (item) => item.type === "system" && item.content.includes("Repository behavior:"),
+    );
+
+    if (includePolicy && !alreadyHasPolicy) {
+        items.push({
+            type: "message",
+            role: "system",
+            content: policyText,
+        });
+    }
 
     for (const item of transcript) {
         switch (item.type) {

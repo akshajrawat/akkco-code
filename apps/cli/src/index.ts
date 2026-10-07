@@ -3,7 +3,7 @@ import { createTextToolCompatibilityProvider, OpenAICompatibleProvider } from "@
 import { createRepositoryTools, createToolRegistry } from "@akkco/tools";
 import { readFile } from "node:fs/promises";
 import process, { stdin, stdout } from "node:process";
-import { parseMaxToolIterations, parseToolMode } from "./config.js";
+import { DEFAULT_MODEL, parseMaxToolIterations, parseToolMode } from "./config.js";
 import { runPlainCli } from "./plain-cli.js";
 import { createCliController } from "./state/cli-controller.js";
 import type { CliMetadata } from "./state/types.js";
@@ -12,7 +12,7 @@ const main = async () => {
     const toolMode = parseToolMode(process.env.AKKCO_TOOL_MODE);
     const maxToolIterations = parseMaxToolIterations(process.env.AKKCO_MAX_TOOL_ITERATIONS);
 
-    const model = process.env.AKKCO_MODEL ?? "qwen2.5-coder:3b";
+    const model = process.env.AKKCO_MODEL ?? DEFAULT_MODEL;
     let nativeProvider: ModelProvider;
     let providerName = "OpenAICompatible";
 

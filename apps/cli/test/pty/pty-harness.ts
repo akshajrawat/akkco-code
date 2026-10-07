@@ -244,10 +244,16 @@ export const startTui = async (options: PtyHarnessOptions = {}): Promise<PtyHarn
     });
 
     // Wait until startup completes and initial prompt appears
-    await harness.waitFor((screen) => screen.hasText("›") || screen.hasText("Idle"), {
-        timeout: 10000,
-        message: "initial TUI startup prompt",
-    });
+    await harness.waitFor(
+        (screen) =>
+            screen.hasText("Ask Akkco anything…") ||
+            (screen.hasText("›") && screen.hasText("Idle")),
+        {
+            timeout: 10000,
+            message: "initial TUI startup prompt",
+        },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
     return harness;
 };

@@ -1,4 +1,6 @@
-import type { ModelProvider } from "@akkco/models";
+import { createAkkcoRuntime, type RuntimeEvent, type RuntimeToolHost } from "@akkco/core";
+import type { ModelEvent, ModelMessage, ModelProvider, ModelRequest } from "@akkco/models";
+import { createTextToolCompatibilityProvider } from "@akkco/providers";
 import { createToolRegistry } from "@akkco/tools";
 import assert from "node:assert";
 import { type ChildProcess, spawn } from "node:child_process";
@@ -674,4 +676,91 @@ test("createCliController has no environment dependency and accepts reliabilityO
             process.env.AKKCO_TOOL_MODE = originalToolMode;
         }
     }
+});
+
+test("Runtime integration preserves assistant pre-tool text before tool execution", async () => {
+    let turnCount = 0;
+    const capturedRequests: ModelRequest[] = [];
+
+    const innerProvider: ModelProvider = {
+        id: "mock-inner",
+        stream: (request: ModelRequest) => {
+            capturedRequests.push(request);
+            turnCount++;
+            if (turnCount === 1) {
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        yield {
+                            type: "text",
+                            content:
+                                'I will inspect the file.\n\n<akkco_tool_call>{"name":"read_file","arguments":{"path":"foo.ts"}}</akkco_tool_call>',
+                        } satisfies ModelEvent;
+                    },
+                };
+            }
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield {
+                        type: "text",
+                        content: "File contains foo details.",
+                    } satisfies ModelEvent;
+                },
+            };
+        },
+    };
+
+    const compatProvider = createTextToolCompatibilityProvider(innerProvider);
+
+    let executedTool = false;
+    const toolHost: RuntimeToolHost = {
+        tools: [
+            {
+                name: "read_file",
+                description: "read file",
+                inputSchema: { type: "object", properties: { path: { type: "string" } } },
+            },
+        ],
+        execute: async (name, args: any) => {
+            executedTool = true;
+            assert.strictEqual(name, "read_file");
+            assert.deepStrictEqual(args, { path: "foo.ts" });
+            return { content: "foo content" };
+        },
+    };
+
+    const runtime = createAkkcoRuntime(compatProvider, toolHost);
+    const events: RuntimeEvent[] = [];
+    for await (const event of runtime.run({
+        items: [{ type: "message", role: "user", content: "read foo.ts" }],
+    })) {
+        events.push(event);
+    }
+
+    assert.strictEqual(turnCount, 2);
+    assert.strictEqual(executedTool, true);
+
+    // Verify events sequence delivered by Runtime
+    assert.strictEqual(events.length, 3);
+    assert.deepStrictEqual(events[0], { type: "text", content: "I will inspect the file.\n\n" });
+    assert.strictEqual(events[1].type, "tool_execution");
+    if (events[1].type === "tool_execution") {
+        assert.strictEqual(events[1].toolName, "read_file");
+        assert.strictEqual(events[1].status, "completed");
+        assert.strictEqual(events[1].result, "foo content");
+    }
+    assert.deepStrictEqual(events[2], { type: "text", content: "File contains foo details." });
+
+    // Verify that the second request sent to the provider preserved the assistant pre-tool text
+    assert.strictEqual(capturedRequests.length, 2);
+    const secondReq = capturedRequests[1];
+    // In compatibility mode, items[0] is system tool instructions.
+    // items[1] is the user request.
+    // items[2] is the assistant message containing the pre-tool prose and tool envelope.
+    const assistantMsg = secondReq.items.find(
+        (it): it is ModelMessage => it.type === "message" && it.role === "assistant",
+    );
+    assert.ok(assistantMsg);
+    assert.match(assistantMsg.content, /^I will inspect the file\.\n\n<akkco_tool_call>/);
+    assert.match(assistantMsg.content, /"name":"read_file"/);
+    assert.match(assistantMsg.content, /<\/akkco_tool_call>$/);
 });

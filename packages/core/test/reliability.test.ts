@@ -7,7 +7,11 @@ import {
     type RuntimeEvent,
     type RuntimeToolHost,
 } from "../src/index.js";
-import { canonicalizeValue, getToolCallSignature } from "../src/runtime/reliability.js";
+import {
+    canonicalizeValue,
+    detectRepeatedToolCycle,
+    getToolCallSignature,
+} from "../src/runtime/reliability.js";
 
 // Helper to create a runtime event collector
 const collectEvents = async (
@@ -609,4 +613,584 @@ test("canonicalizeValue and getToolCallSignature: deterministic argument canonic
     const arrVal1 = canonicalizeValue([{ b: 1, a: 2 }]);
     const arrVal2 = canonicalizeValue([{ a: 2, b: 1 }]);
     assert.deepStrictEqual(arrVal1, arrVal2);
+});
+
+// Cycle detection unit tests
+test("detectRepeatedToolCycle: identifies repeated pattern cycles", () => {
+    // ABAB cycle
+    assert.deepStrictEqual(detectRepeatedToolCycle(["A", "B", "A"], "B"), {
+        isCycle: true,
+        cycleLength: 2,
+        pattern: ["A", "B"],
+    });
+
+    // ABCABC cycle
+    assert.deepStrictEqual(detectRepeatedToolCycle(["A", "B", "C", "A", "B"], "C"), {
+        isCycle: true,
+        cycleLength: 3,
+        pattern: ["A", "B", "C"],
+    });
+
+    // ABCDABCD cycle
+    assert.deepStrictEqual(detectRepeatedToolCycle(["A", "B", "C", "D", "A", "B", "C"], "D"), {
+        isCycle: true,
+        cycleLength: 4,
+        pattern: ["A", "B", "C", "D"],
+    });
+
+    // A A A is handled by repeatedToolCallLimit, not cycle detection
+    assert.deepStrictEqual(detectRepeatedToolCycle(["A", "A"], "A"), {
+        isCycle: false,
+    });
+
+    // Non-repeating sequences
+    assert.deepStrictEqual(detectRepeatedToolCycle(["A", "B", "C"], "D"), {
+        isCycle: false,
+    });
+});
+
+// ABAB runtime test
+test("cycle detection: detects ABAB pattern and emits synthetic warning without executing 4th call", async () => {
+    const executed: string[] = [];
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn === 1) {
+                        yield {
+                            type: "tool_call",
+                            id: "c1",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 2) {
+                        yield {
+                            type: "tool_call",
+                            id: "c2",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 3) {
+                        yield {
+                            type: "tool_call",
+                            id: "c3",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 4) {
+                        // 4th call confirms cycle A B A B
+                        yield {
+                            type: "tool_call",
+                            id: "c4",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        yield { type: "text", content: "answered" } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async (name) => {
+            executed.push(name);
+            return { content: `result from ${name}` };
+        },
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const events = await collectEvents(runtime, {
+        items: [{ type: "message", role: "user", content: "start" }],
+    });
+
+    // Executed tool calls are only A, B, A (toolB was NOT executed on 4th call)
+    assert.deepStrictEqual(executed, ["toolA", "toolB", "toolA"]);
+
+    const warningExecution = events.find((e) => e.type === "tool_execution" && e.callId === "c4");
+    assert.ok(warningExecution && warningExecution.type === "tool_execution");
+    assert.strictEqual(warningExecution.status, "failed");
+    assert.match(
+        warningExecution.error ?? "",
+        /Repeated tool strategy: pattern of recent tool calls is repeating/,
+    );
+
+    const textEvent = events.find((e) => e.type === "text");
+    assert.ok(textEvent && textEvent.type === "text");
+    assert.strictEqual(textEvent.content, "answered");
+});
+
+// ABCABC runtime test
+test("cycle detection: detects ABCABC pattern and warns on 6th call", async () => {
+    const executed: string[] = [];
+    const calls = ["toolA", "toolB", "toolC", "toolA", "toolB", "toolC"];
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn <= 6) {
+                        yield {
+                            type: "tool_call",
+                            id: `c${turn}`,
+                            name: calls[turn - 1],
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        yield { type: "text", content: "finished" } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async (name) => {
+            executed.push(name);
+            return { content: `ok ${name}` };
+        },
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const events = await collectEvents(runtime, {
+        items: [{ type: "message", role: "user", content: "start" }],
+    });
+
+    // 6th call was toolC, which should not execute
+    assert.deepStrictEqual(executed, ["toolA", "toolB", "toolC", "toolA", "toolB"]);
+
+    const warningExecution = events.find((e) => e.type === "tool_execution" && e.callId === "c6");
+    assert.ok(warningExecution && warningExecution.type === "tool_execution");
+    assert.strictEqual(warningExecution.status, "failed");
+    assert.match(warningExecution.error ?? "", /Repeated tool strategy/);
+});
+
+// ABCDABCD runtime test
+test("cycle detection: detects ABCDABCD pattern and warns on 8th call", async () => {
+    const executed: string[] = [];
+    const calls = ["toolA", "toolB", "toolC", "toolD", "toolA", "toolB", "toolC", "toolD"];
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn <= 8) {
+                        yield {
+                            type: "tool_call",
+                            id: `c${turn}`,
+                            name: calls[turn - 1],
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        yield { type: "text", content: "finished" } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async (name) => {
+            executed.push(name);
+            return { content: `ok ${name}` };
+        },
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const events = await collectEvents(runtime, {
+        items: [{ type: "message", role: "user", content: "start" }],
+    });
+
+    // 8th call was toolD, which should not execute
+    assert.deepStrictEqual(executed, [
+        "toolA",
+        "toolB",
+        "toolC",
+        "toolD",
+        "toolA",
+        "toolB",
+        "toolC",
+    ]);
+
+    const warningExecution = events.find((e) => e.type === "tool_execution" && e.callId === "c8");
+    assert.ok(warningExecution && warningExecution.type === "tool_execution");
+    assert.strictEqual(warningExecution.status, "failed");
+    assert.match(warningExecution.error ?? "", /Repeated tool strategy/);
+});
+
+// similar tools with different arguments do not trigger
+test("cycle detection: similar tools with different arguments do not trigger cycle detection", async () => {
+    const executed: string[] = [];
+    const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"];
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn <= files.length) {
+                        yield {
+                            type: "tool_call",
+                            id: `c${turn}`,
+                            name: "read_file",
+                            arguments: { path: files[turn - 1] },
+                        } satisfies ModelEvent;
+                    } else {
+                        yield { type: "text", content: "read all files" } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async (_name, args) => {
+            executed.push((args as { path: string }).path);
+            return { content: "content" };
+        },
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const events = await collectEvents(runtime, {
+        items: [{ type: "message", role: "user", content: "read files" }],
+    });
+
+    assert.deepStrictEqual(executed, files);
+    const textEvent = events.find((e) => e.type === "text");
+    assert.ok(textEvent);
+    assert.strictEqual(textEvent.content, "read all files");
+});
+
+// strategy change after warning recovers
+test("cycle detection: strategy change after warning recovers successfully", async () => {
+    const executed: string[] = [];
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn === 1) {
+                        yield {
+                            type: "tool_call",
+                            id: "c1",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 2) {
+                        yield {
+                            type: "tool_call",
+                            id: "c2",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 3) {
+                        yield {
+                            type: "tool_call",
+                            id: "c3",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 4) {
+                        // confirms cycle A B A B -> warning emitted
+                        yield {
+                            type: "tool_call",
+                            id: "c4",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 5) {
+                        // Strategy change: calls toolC!
+                        yield {
+                            type: "tool_call",
+                            id: "c5",
+                            name: "toolC",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        yield {
+                            type: "text",
+                            content: "recovered successfully",
+                        } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async (name) => {
+            executed.push(name);
+            return { content: `ok ${name}` };
+        },
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+    const events = await collectEvents(runtime, {
+        items: [{ type: "message", role: "user", content: "start" }],
+    });
+
+    // toolC should have executed after the warning
+    assert.deepStrictEqual(executed, ["toolA", "toolB", "toolA", "toolC"]);
+    const textEvent = events.find((e) => e.type === "text");
+    assert.ok(textEvent);
+    assert.strictEqual(textEvent.content, "recovered successfully");
+});
+
+// repeated cycle after warning terminates
+test("cycle detection: repeated cycle after warning terminates with AgentLoopError('repeated_tool_cycle')", async () => {
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn === 1) {
+                        yield {
+                            type: "tool_call",
+                            id: "c1",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 2) {
+                        yield {
+                            type: "tool_call",
+                            id: "c2",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 3) {
+                        yield {
+                            type: "tool_call",
+                            id: "c3",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 4) {
+                        // confirms cycle A B A B -> warning emitted
+                        yield {
+                            type: "tool_call",
+                            id: "c4",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        // Fails to change strategy: repeats toolB again!
+                        yield {
+                            type: "tool_call",
+                            id: `c${turn}`,
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async (name) => ({ content: `ok ${name}` }),
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+
+    await assert.rejects(
+        async () => {
+            await collectEvents(runtime, {
+                items: [{ type: "message", role: "user", content: "start" }],
+            });
+        },
+        (err: unknown) => {
+            assert.ok(err instanceof AgentLoopError);
+            assert.strictEqual(err.reason, "repeated_tool_cycle");
+            assert.match(err.message, /repeated tool strategy cycle detected/);
+            return true;
+        },
+    );
+});
+
+// cancellation near cycle detection wins
+test("cycle detection: cancellation near cycle detection wins over reliability error", async () => {
+    const controller = new AbortController();
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    if (turn === 1) {
+                        yield {
+                            type: "tool_call",
+                            id: "c1",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 2) {
+                        yield {
+                            type: "tool_call",
+                            id: "c2",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 3) {
+                        yield {
+                            type: "tool_call",
+                            id: "c3",
+                            name: "toolA",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else if (turn === 4) {
+                        yield {
+                            type: "tool_call",
+                            id: "c4",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    } else {
+                        // Abort signal right before repeating call that would terminate with repeated_tool_cycle
+                        controller.abort();
+                        yield {
+                            type: "tool_call",
+                            id: "c5",
+                            name: "toolB",
+                            arguments: {},
+                        } satisfies ModelEvent;
+                    }
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async () => ({ content: "ok" }),
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost);
+
+    await assert.rejects(
+        async () => {
+            await collectEvents(runtime, {
+                items: [{ type: "message", role: "user", content: "start" }],
+                signal: controller.signal,
+            });
+        },
+        (err: any) => {
+            assert.notStrictEqual(err.name, "AgentLoopError");
+            assert.ok(err.name === "AbortError" || /aborted/i.test(err.message));
+            return true;
+        },
+    );
+});
+
+// maxToolIterations still acts as final hard ceiling
+test("cycle detection: maxToolIterations still acts as final hard ceiling", async () => {
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    // Alternating cycle A B A B
+                    yield {
+                        type: "tool_call",
+                        id: `c${turn}`,
+                        name: turn % 2 === 1 ? "toolA" : "toolB",
+                        arguments: {},
+                    } satisfies ModelEvent;
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async () => ({ content: "ok" }),
+    };
+
+    // Hard ceiling of 2 iterations (before 4th call can confirm cycle A B A B)
+    const runtime = createAkkcoRuntime(provider, toolHost, { maxToolIterations: 2 });
+
+    await assert.rejects(
+        async () => {
+            await collectEvents(runtime, {
+                items: [{ type: "message", role: "user", content: "start" }],
+            });
+        },
+        (err: unknown) => {
+            assert.ok(err instanceof AgentLoopError);
+            assert.strictEqual(err.reason, "max_tool_iterations");
+            return true;
+        },
+    );
+});
+
+// existing repeated identical call behavior remains unchanged
+test("existing repeated identical call behavior remains unchanged", async () => {
+    let turn = 0;
+
+    const provider: ModelProvider = {
+        id: "mock",
+        stream: () => {
+            turn++;
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield {
+                        type: "tool_call",
+                        id: `c${turn}`,
+                        name: "same_tool",
+                        arguments: { arg: "val" },
+                    } satisfies ModelEvent;
+                },
+            };
+        },
+    };
+
+    const toolHost: RuntimeToolHost = {
+        tools: [],
+        execute: async () => ({ content: "ok" }),
+    };
+
+    const runtime = createAkkcoRuntime(provider, toolHost, { repeatedToolCallLimit: 3 });
+
+    await assert.rejects(
+        async () => {
+            await collectEvents(runtime, {
+                items: [{ type: "message", role: "user", content: "same" }],
+            });
+        },
+        (err: unknown) => {
+            assert.ok(err instanceof AgentLoopError);
+            assert.strictEqual(err.reason, "repeated_tool_call");
+            assert.match(err.message, /repeated tool call/i);
+            return true;
+        },
+    );
 });

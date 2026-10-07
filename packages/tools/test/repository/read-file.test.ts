@@ -78,7 +78,38 @@ test("read_file rejects an absolute outside path", async () => {
 
         await assert.rejects(async () => {
             await tool.execute({ path: outsideFile });
-        }, /escapes repository root/i);
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});
+
+test("read_file rejects an absolute path within repository root", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const tool = createReadFileTool(repoRoot);
+        const absPath = path.join(repoRoot, "sample.txt");
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: absPath });
+        }, /Repository path must be relative/i);
+    } finally {
+        await cleanup();
+    }
+});
+
+test("read_file rejects Windows-style absolute drive path", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const tool = createReadFileTool(repoRoot);
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: "C:\\repo\\sample.txt" });
+        }, /Repository path must be relative/i);
+
+        await assert.rejects(async () => {
+            await tool.execute({ path: "D:/repo/sample.txt" });
+        }, /Repository path must be relative/i);
     } finally {
         await cleanup();
     }

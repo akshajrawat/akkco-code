@@ -43,6 +43,7 @@ export class TextToolCompatibilityProvider implements ModelProvider {
     ): AsyncGenerator<ModelEvent, ReadTurnResult, unknown> {
         let rawText = "";
         let bufferedText = "";
+        let emittedProseLength = 0;
         let state: "DETECTING" | "STREAMING_PROSE" | "SUPPRESSING" = "DETECTING";
 
         for await (const event of this.provider.stream(request)) {
@@ -51,6 +52,7 @@ export class TextToolCompatibilityProvider implements ModelProvider {
             if (event.type === "tool_call") {
                 if (bufferedText.length > 0) {
                     yield { type: "text", content: bufferedText } satisfies ModelTextEvent;
+                    emittedProseLength += bufferedText.length;
                     bufferedText = "";
                 }
                 yield event;
@@ -59,8 +61,28 @@ export class TextToolCompatibilityProvider implements ModelProvider {
 
             rawText += event.content;
 
+            if (state === "SUPPRESSING") {
+                continue;
+            }
+
             if (rawText.includes("akkco_tool")) {
                 state = "SUPPRESSING";
+                const openTagIndex = rawText.indexOf(TOOL_CALL_OPEN_TAG);
+                const markerIndex =
+                    openTagIndex !== -1 ? openTagIndex : rawText.indexOf("<akkco_tool");
+                const tagIndex = markerIndex !== -1 ? markerIndex : rawText.indexOf("akkco_tool");
+                const preToolRaw = rawText.slice(0, tagIndex);
+
+                const fenceCount = preToolRaw.split("```").length - 1;
+                const isFenced = fenceCount % 2 !== 0 || /```[a-zA-Z0-9_-]*\s*$/.test(preToolRaw);
+
+                if (!isFenced && preToolRaw.trim() !== "" && tagIndex > emittedProseLength) {
+                    const unEmitted = rawText.slice(emittedProseLength, tagIndex);
+                    if (unEmitted.length > 0) {
+                        yield { type: "text", content: unEmitted } satisfies ModelTextEvent;
+                        emittedProseLength += unEmitted.length;
+                    }
+                }
                 bufferedText = "";
                 continue;
             }
@@ -97,10 +119,12 @@ export class TextToolCompatibilityProvider implements ModelProvider {
 
                 if (markerIndex === -1) {
                     yield { type: "text", content: bufferedText } satisfies ModelTextEvent;
+                    emittedProseLength += bufferedText.length;
                     bufferedText = "";
                 } else if (markerIndex > 0) {
                     const safeProse = bufferedText.slice(0, markerIndex);
                     yield { type: "text", content: safeProse } satisfies ModelTextEvent;
+                    emittedProseLength += safeProse.length;
                     bufferedText = bufferedText.slice(markerIndex);
                 }
             }

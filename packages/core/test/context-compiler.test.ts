@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import test from "node:test";
 import { compileContext } from "../src/index.js";
+import { AGENT_POLICY } from "../src/context/context-compiler.js";
 import type {
     AssistantTranscriptItem,
     SystemTranscriptItem,
@@ -9,11 +10,14 @@ import type {
     UserTranscriptItem,
 } from "../src/index.js";
 
+const compileWithoutPolicy = (transcript: TranscriptItem[]) =>
+    compileContext(transcript, { includePolicy: false });
+
 test("compileContext: system item compilation", () => {
     const transcript: SystemTranscriptItem[] = [
         { type: "system", content: "You are a helpful coding assistant." },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         { type: "message", role: "system", content: "You are a helpful coding assistant." },
     ]);
@@ -21,7 +25,7 @@ test("compileContext: system item compilation", () => {
 
 test("compileContext: user item compilation", () => {
     const transcript: UserTranscriptItem[] = [{ type: "user", content: "Write a function" }];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [{ type: "message", role: "user", content: "Write a function" }]);
 });
 
@@ -29,7 +33,7 @@ test("compileContext: completed assistant item compilation", () => {
     const transcript: AssistantTranscriptItem[] = [
         { type: "assistant", content: "Here is your code.", status: "completed" },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         { type: "message", role: "assistant", content: "Here is your code." },
     ]);
@@ -39,7 +43,7 @@ test("compileContext: interrupted assistant with non-empty content includes part
     const transcript: AssistantTranscriptItem[] = [
         { type: "assistant", content: "Partial code...", status: "interrupted" },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         { type: "message", role: "assistant", content: "Partial code..." },
         {
@@ -54,7 +58,7 @@ test("compileContext: interrupted assistant with empty content emits only the co
     const transcript: AssistantTranscriptItem[] = [
         { type: "assistant", content: "", status: "interrupted" },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         {
             type: "message",
@@ -68,7 +72,7 @@ test("compileContext: failed assistant includes partial message (if any) and fai
     const transcriptWithContent: AssistantTranscriptItem[] = [
         { type: "assistant", content: "Halfway through...", status: "failed" },
     ];
-    const items1 = compileContext(transcriptWithContent);
+    const items1 = compileWithoutPolicy(transcriptWithContent);
     assert.deepStrictEqual(items1, [
         { type: "message", role: "assistant", content: "Halfway through..." },
         {
@@ -81,7 +85,7 @@ test("compileContext: failed assistant includes partial message (if any) and fai
     const transcriptEmpty: AssistantTranscriptItem[] = [
         { type: "assistant", content: "", status: "failed" },
     ];
-    const items2 = compileContext(transcriptEmpty);
+    const items2 = compileWithoutPolicy(transcriptEmpty);
     assert.deepStrictEqual(items2, [
         {
             type: "message",
@@ -103,7 +107,7 @@ test("compileContext: completed tool execution emits ModelToolCall and ModelTool
             durationMs: 42,
         },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         {
             type: "tool_call",
@@ -131,7 +135,7 @@ test("compileContext: failed tool execution emits ModelToolCall and ModelToolRes
             durationMs: 15,
         },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         {
             type: "tool_call",
@@ -158,7 +162,7 @@ test("compileContext: cancelled tool execution emits ModelToolCall and ModelTool
             status: "cancelled",
         },
     ];
-    const items = compileContext(transcript);
+    const items = compileWithoutPolicy(transcript);
     assert.deepStrictEqual(items, [
         {
             type: "tool_call",
@@ -191,7 +195,7 @@ test("compileContext: requested and running tool execution emits only ModelToolC
         status: "running",
     };
 
-    const items = compileContext([requestedItem, runningItem]);
+    const items = compileWithoutPolicy([requestedItem, runningItem]);
     assert.deepStrictEqual(items, [
         {
             type: "tool_call",
@@ -218,7 +222,7 @@ test("compileContext: durationMs and internal metadata are never exposed on Mode
         status: "completed",
         durationMs: 1234,
     };
-    const compiled = compileContext([item]);
+    const compiled = compileWithoutPolicy([item]);
     for (const modelItem of compiled) {
         assert.strictEqual("durationMs" in modelItem, false);
         assert.strictEqual("status" in modelItem, false);
@@ -249,7 +253,7 @@ test("compileContext: deterministic ordering across heterogeneous transcript", (
         { type: "assistant", content: "Cancelled early", status: "interrupted" },
     ];
 
-    const compiled = compileContext(transcript);
+    const compiled = compileWithoutPolicy(transcript);
 
     assert.deepStrictEqual(compiled, [
         { type: "message", role: "system", content: "System instructions" },
@@ -285,5 +289,76 @@ test("compileContext: deterministic ordering across heterogeneous transcript", (
             role: "system",
             content: "[Previous assistant generation was interrupted before completion]",
         },
+    ]);
+});
+
+test("compileContext: default compileContext prepends AGENT_POLICY once at index 0", () => {
+    const transcript: UserTranscriptItem[] = [{ type: "user", content: "hello" }];
+    const compiled = compileContext(transcript);
+    assert.strictEqual(compiled.length, 2);
+    assert.deepStrictEqual(compiled[0], {
+        type: "message",
+        role: "system",
+        content: AGENT_POLICY,
+    });
+    assert.deepStrictEqual(compiled[1], {
+        type: "message",
+        role: "user",
+        content: "hello",
+    });
+});
+
+test("compileContext: does not duplicate AGENT_POLICY if already present in transcript", () => {
+    const transcript: TranscriptItem[] = [
+        { type: "system", content: AGENT_POLICY },
+        { type: "user", content: "hello" },
+    ];
+    const compiled = compileContext(transcript);
+    assert.strictEqual(compiled.length, 2);
+    assert.deepStrictEqual(compiled[0], {
+        type: "message",
+        role: "system",
+        content: AGENT_POLICY,
+    });
+    assert.deepStrictEqual(compiled[1], {
+        type: "message",
+        role: "user",
+        content: "hello",
+    });
+});
+
+test("compileContext: preserves deterministic transcript ordering when AGENT_POLICY is present", () => {
+    const transcript: TranscriptItem[] = [
+        { type: "system", content: "Custom system prompt" },
+        { type: "user", content: "Inspect repo" },
+        {
+            type: "tool_execution",
+            callId: "call_1",
+            toolName: "list_files",
+            arguments: { path: "." },
+            result: "file1.ts\nfile2.ts",
+            status: "completed",
+        },
+        { type: "assistant", content: "I see file1.ts and file2.ts.", status: "completed" },
+    ];
+
+    const compiled = compileContext(transcript);
+
+    assert.deepStrictEqual(compiled, [
+        { type: "message", role: "system", content: AGENT_POLICY },
+        { type: "message", role: "system", content: "Custom system prompt" },
+        { type: "message", role: "user", content: "Inspect repo" },
+        {
+            type: "tool_call",
+            id: "call_1",
+            name: "list_files",
+            arguments: { path: "." },
+        },
+        {
+            type: "tool_result",
+            callId: "call_1",
+            content: "file1.ts\nfile2.ts",
+        },
+        { type: "message", role: "assistant", content: "I see file1.ts and file2.ts." },
     ]);
 });

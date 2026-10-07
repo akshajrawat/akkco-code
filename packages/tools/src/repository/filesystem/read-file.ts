@@ -7,7 +7,9 @@ const readFileInputSchema = z.object({
     path: z
         .string()
         .min(1, "Path cannot be empty")
-        .describe("Path to the file to read (expects a file, not a directory)."),
+        .describe(
+            "Repository-relative path to the file to read (expects a file, not a directory).",
+        ),
 });
 
 export const createReadFileTool = (
