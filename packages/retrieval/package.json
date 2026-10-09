@@ -1,0 +1,20 @@
+{
+    "name": "@akkco/retrieval",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./src/index.ts",
+            "default": "./src/index.ts"
+        }
+    },
+    "files": [
+        "dist",
+        "src",
+        "migrations"
+    ],
+    "dependencies": {
+        "@akkco/models": "0.0.1"
+    }
+}

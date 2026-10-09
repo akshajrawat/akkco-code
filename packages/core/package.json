@@ -10,6 +10,7 @@
         }
     },
     "dependencies": {
-        "@akkco/models": "0.0.1"
+        "@akkco/models": "0.0.1",
+        "@akkco/retrieval": "0.0.1"
     }
 }
