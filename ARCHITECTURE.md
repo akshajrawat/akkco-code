@@ -6,20 +6,23 @@ akkco-code/
 │   └── cli/        → terminal bootstrap, controller & presentation
 └── packages/
     ├── core/       → Akkco runtime, session, transcript & context compiler
-    ├── models/     → provider-neutral model contracts & testing utilities
-    ├── providers/  → uses model types to connect to provider
+    ├── models/     → provider-neutral model & embedding contracts & testing utilities
+    ├── providers/  → model and embedding providers (OpenAI-compatible, compatibility)
+    ├── retrieval/  → SQLite persistence infrastructure, vector serialization & memory search
     └── tools/      → tool definition, registry & execution contracts
 ```
 
-1. `apps/cli` : This is the app that users see. It owns configuration, input/output, the Ink/React terminal UI, a plain stream renderer for piped usage, cancellation handling (SIGINT / AbortSignal), and interactive commands (`/exit`, `/clear`, `/tools`, `/tool <name> [json]`). All terminal presentation stays inside this application; internal packages have no dependency on Ink or React.
+1. `apps/cli` : This is the app that users see. It owns configuration, input/output, the Ink/React terminal UI, a plain stream renderer for piped usage, cancellation handling (SIGINT / AbortSignal), and interactive commands (`/exit`, `/clear`, `/tools`, `/tool <name> [json]`). All terminal presentation stays inside this application; internal packages have no dependency on Ink or React. Composition root injects providers, tool registries, storage persistence, and the bounded asynchronous context compiler into `Session`.
 
-2. `packages/core` : This is the main runtime and session logic (`Session → Runtime`). Organised into `runtime/` (`runtime.ts`, `events.ts`, `tool-host.ts`, `reliability.ts`), `session.ts`, `context/` (`context-compiler.ts`), and `transcript/` (`types.ts`). `Session` exclusively owns the conversation transcript (`TranscriptItem[]`) as its internal source of truth. Before each request, `compileContext(transcript)` compiles the transcript into provider-neutral `ModelItem[]` for `Runtime`, prepending a tiny provider-neutral agent policy (`AGENT_POLICY`) once without duplication or reordering. `Runtime` coordinates the automatic model → tool → model agent loop across multiple turns using `RuntimeToolHost` (decoupled from tools/registry internals), yielding `RuntimeEvent` (`RuntimeTextEvent`, `RuntimeToolExecutionEvent`) with deterministic loop reliability controls via `RuntimeReliabilityOptions` (`maxToolIterations` defaulting to 25, `repeatedToolCallLimit` defaulting to 3, and `consecutiveToolErrorLimit` defaulting to 4). In addition to consecutive identical call limits (`repeated_tool_call`), Reliability v1.1 introduces multi-step cycle detection (`detectRepeatedToolCycle`) across canonicalized tool-call signatures over a bounded history window (up to 30 recent calls) to detect repeating patterns such as `ABAB`, `ABCABC`, and `ABCDABCD`. When a repeated cycle is confirmed, execution is halted for that call, a synthetic warning `ModelToolResult` is emitted, and the model receives exactly one turn to change strategy. If the cycle persists without strategy change, the loop terminates with `AgentLoopError(reason="repeated_tool_cycle")`. If tool executions repeatedly fail, reaching the consecutive error threshold terminates the loop with `AgentLoopError(reason="consecutive_tool_errors")` (resetting the error counter on any success). `AbortSignal` cancellation strictly takes precedence over reliability checks and errors. `Session` records user turns, assistant pre-tool text, tool executions (`status: "completed" | "failed"`), and final assistant segments, maintaining strict chronological isolation and in-flight locks.
+2. `packages/core` : This is the main runtime and session logic (`Session → Runtime`). Organised into `runtime/` (`runtime.ts`, `events.ts`, `tool-host.ts`, `reliability.ts`), `session.ts`, `context/` (`context-compiler.ts`, `bounded-context-compiler.ts`, `budget.ts`, `token-estimator.ts`), `memory/` (`memory-document.ts`, `memory-orchestrator.ts`, `memory-retriever.ts`), and `transcript/` (`types.ts`). `Session` exclusively owns the canonical conversation transcript (`TranscriptItem[]`) as its internal source of truth. Before each request, an asynchronous `ContextCompiler` compiles a bounded, token-budgeted set of provider-neutral `ModelItem[]` for `Runtime`. `Runtime` coordinates the automatic model → tool → model agent loop across multiple turns using `RuntimeToolHost`, yielding `RuntimeEvent` with deterministic loop reliability controls.
 
-3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest` (`items`, `tools`, `signal`), and discriminated `ModelEvent` union (`ModelTextEvent`, `ModelToolCallEvent`).
+3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`, `embedding`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest`, `ModelEvent`, `ModelProvider`, `EmbeddingProvider`, and `EmbeddingIdentity`. In `testing/`, provides `FakeModelProvider` and deterministic offline `DeterministicFakeEmbeddingProvider` for reproducible ranking and similarity testing without randomness.
 
-4. `packages/providers` : Implements concrete providers organized in provider-specific folders (e.g. `openai-compatible/`) connecting to model APIs using the common contracts. Under `openai-compatible/`, responsibilities are strictly factored into `request-mapper.ts` (translates provider-neutral `ModelRequest`, `ModelItem` messages/tool calls/results, and `ModelTool` definitions into OpenAI-compatible payload), `stream-parser.ts` (decodes SSE chunks, emits text deltas, incrementally accumulates fragmented `tool_calls` by index/id, safely validates and parses JSON arguments upon completion, and prevents duplicate emissions or incomplete calls on cancellation), and `openai-compatible-provider.ts` (fetch, HTTP status handling, response streaming, cancellation orchestration). Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`) for models/providers that understand tools conceptually but do not emit native structured tool calls (e.g. Ollama + `qwen2.5-coder:7b`). It converts historical `ModelToolCall` and `ModelToolResult` items into textual protocol messages (`<akkco_tool_call>`, `<akkco_tool_result>`) and injects ephemeral tool instructions into the request sent to the wrapped provider with `tools: undefined`. It preserves provider-neutral `AGENT_POLICY` intact. It parses incoming model text envelopes into provider-neutral `ModelToolCallEvent`s while streaming normal text without buffering delays. Public API boundary is `packages/providers/src/index.ts`.
+4. `packages/providers` : Implements concrete providers connecting to model and embedding APIs using the common contracts. Under `openai-compatible/`, provides `OpenAICompatibleProvider` for chat completions and `OpenAICompatibleEmbeddingProvider` for `/embeddings`. Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`). Public API boundary is `packages/providers/src/index.ts`.
 
-5. `packages/tools` : Organised into `core/` (`types`, `executor`, `registry`), `repository/` (`repository-tools`, `filesystem/` tools: `read_file`, `list_files`, `search_text` with path security boundary), and `model/` (`model-tool-adapter`). Concrete tools strictly correlate schema and input via `ToolDefinition<TSchema>`, while dynamic registries erase schemas through `AnyToolDefinition`. The shared path boundary `resolveRepositoryPath` enforces repository-relative path discipline by immediately rejecting absolute filesystem paths (POSIX `/...`, Windows `C:\...`) with an instructive error message, while preserving lexical and realpath symlink containment protections. The model tool adapter bridges executable `ToolDefinition` to provider-neutral `ModelTool` descriptions (`toModelTool`, `toModelTools`), converting Zod schemas to clean JSON Schemas while stripping execution details and schema metadata. Depends on `@akkco/models` for the contract without circular dependencies. Public API boundary is `packages/tools/src/index.ts`.
+5. `packages/retrieval` : Manages SQLite-backed local persistence using Node.js built-in `node:sqlite` (`DatabaseSync`). Houses schema versioning (`schema_migrations`, `sessions`, `transcript_items`, `memory_documents`), vector BLOB serialization/deserialization with Float32Array precision, cosine similarity search primitives, and the `ConversationStore` / `SqliteConversationStore` implementation. Public API boundary is `packages/retrieval/src/index.ts`.
+
+6. `packages/tools` : Organised into `core/` (`types`, `executor`, `registry`), `repository/` (`repository-tools`, `filesystem/` tools: `read_file`, `list_files`, `search_text` with path security boundary), and `model/` (`model-tool-adapter`). Concrete tools strictly correlate schema and input via `ToolDefinition<TSchema>`, while dynamic registries erase schemas through `AnyToolDefinition`.
 
 ```
 Session Transcript (TranscriptItem[])
@@ -148,6 +151,69 @@ To test the real interactive TUI end-to-end without mocking React or terminal I/
     - `npm run test:tui`: Dedicated PTY E2E suite (~18s) testing complete interactive workflows (startup, autocomplete, keyboard navigation, Tab completion, `/clear` and `/exit`, streaming responses, tool loops, multiline paste, resizing, scrollback, and process cleanup).
     - `npm run verify`: Full verification pipeline executing formatting check, TypeScript typecheck, unit tests, and the PTY E2E suite.
 - **Native Build Requirements**: `node-pty` compiles a native node addon during installation using standard build tools (`make`, `g++`, and Python 3 on Linux/WSL).
+
+## Context Intelligence Foundation & Vector Conversation Memory
+
+### Core Architectural Invariants: Three Distinct Concepts
+
+1. **Session Transcript (`TranscriptItem[]`)**:
+   The complete, lossless chronological source of truth. It records every system message, user turn, pre-tool assistant text, tool execution with status/timing, and final assistant message. It is never truncated, bounded, or mutated by retrieved history.
+2. **Retrieval Index (`memory_documents` in SQLite)**:
+   A derived, searchable representation of completed conversational units. Each document represents a complete user turn (user request + concise deterministic tool activity + final assistant answer). Raw tool result payloads (megabytes of file content or search logs) are never copied into memory documents. Interrupted or failed turns are intentionally omitted from memory indexing.
+3. **Compiled Context (`ModelItem[]`)**:
+   A temporary, bounded context constructed dynamically for a single model request turn by `ContextCompiler.compile()`. Retrieved memory candidates are framed strictly as lower-trust contextual data in a user message with document provenance (never system instructions, ensuring untrusted history cannot gain system-level authority). Retrieved memory is NEVER appended to or pushed into the canonical Session transcript.
+
+### Package Boundaries & Dependency Inversion
+
+- `@akkco/models`: defines provider-neutral `EmbeddingProvider` (`id`, `model`, `embed(inputs, signal): Promise<number[][]>`) and `EmbeddingIdentity` (`provider`, `model`, `dimensions`). Also provides `DeterministicFakeEmbeddingProvider` in `@akkco/models/testing` for deterministic test fixtures with zero randomness.
+- `@akkco/providers`: implements `OpenAICompatibleEmbeddingProvider` connecting to standard `/embeddings` endpoints with batch ordering, non-finite value validation, consistent dimension checks, and `AbortSignal` cancellation.
+- `@akkco/retrieval`: persistence layer using Node.js built-in `node:sqlite` (`DatabaseSync`), providing an async domain contract (`ConversationStore`, `SqliteConversationStore`) without leaking raw SQLite row types. Manages versioned SQL-file migrations (`packages/retrieval/migrations/0001_initial.sql`), single connection handle per instance with shared in-flight `initialize()` deduplication, multi-process write locking (`BEGIN IMMEDIATE` with `PRAGMA busy_timeout = 3000;` and exponential jitter backoff), strict foreign key enforcement (`PRAGMA foreign_keys = ON;`), SHA-256 checksum validation, vector BLOB serialization with Float32 overflow checks, corrupt row isolation, and cosine similarity scanning.
+- `@akkco/core`: context budgeting (`ContextBudget`), centralized token estimation (`estimateTokens`), turn-level memory document derivation, bounded model request preparation (`prepareBoundedModelRequest`, `ContextBudgetOverflowError`), dynamic memory token reclamation, memory orchestrator (`ConversationMemoryOrchestrator` with bounded timeout, signal cancellation, and drain tracking), memory retriever (`ConversationMemoryRetriever`), and async context compiler (`BoundedContextCompiler`). Does not contain raw SQL or direct HTTP calls.
+- `apps/cli`: composition root injecting configuration, default budget (`DEFAULT_CONTEXT_BUDGET`), database path (default `~/.akkco/akkco.db`, override via `AKKCO_DB_PATH`, isolated `:memory:` in test modes), and providers. Enforces fail-fast durable database initialization diagnostics and coordinated shutdown (awaiting active session turn finalization and draining pending memory indexing before closing SQLite).
+
+### Versioned SQLite Migration Infrastructure
+
+Database migrations are managed as ordered `.sql` files in `packages/retrieval/migrations/`:
+
+- **Official Baseline & Forward-Only Policy**: `0001_initial.sql` serves as the mandatory official baseline schema. The runner rejects empty migration directories, missing `0001_initial.sql`, and existing unmanaged conflicting application tables. The runner creates `schema_migrations` (`version`, `filename`, `checksum`, `applied_at`) directly without legacy upgrade or backfill branches. Future migrations execute forward sequentially (`0002_...sql`).
+- **Migration Discovery & Order**: Migrations follow `<version>_<name>.sql` (e.g., `0001_initial.sql`). The TypeScript runner (`loadMigrations`) loads files asynchronously, enforces strict sequential versioning starting from 1 with no gaps or duplicates, and computes SHA-256 checksums normalized across line endings.
+- **Transactional Application & Async Concurrency**: Migrations run with write locking using `BEGIN IMMEDIATE` and `PRAGMA busy_timeout = 3000;`. Retries on `SQLITE_BUSY` use non-blocking asynchronous backoff with random jitter, avoiding event-loop starvation and lock contention deadlock across competing processes. If any migration fails, its transaction is rolled back completely.
+- **Unsupported Legacy Databases & Safe Resets**: Databases from obsolete experimental formats lacking required metadata columns are rejected immediately with a clear actionable error. Akkco never silently or destructively drops databases at startup. Manual reset procedure:
+    1. Terminate all running Akkco CLI / server processes.
+    2. Remove or back up the database and any SQLite sidecar files (`rm ~/.akkco/akkco.db ~/.akkco/akkco.db-wal ~/.akkco/akkco.db-shm` or your custom `AKKCO_DB_PATH`).
+    3. Start Akkco to initialize a fresh database cleanly from `0001_initial.sql`.
+- **Integrity Validation**: Rejects databases with unsupported future schema versions, modified applied migrations (checksum mismatch), missing migration files, unmanaged conflicting tables, or unapplied gaps.
+- **Connection Configuration**: Enforces `PRAGMA foreign_keys = ON;` and `PRAGMA busy_timeout = 3000;` on all connections, enabling cascade deletions for dependent transcript and memory records.
+
+### Token Budgeting & Dynamic Candidate Count
+
+The Context Compiler accepts an explicit `ContextBudget`:
+
+- `preferredInputTokens`: target upper bound for the model request input.
+- `reservedOverheadTokens`: capacity reserved for provider formatting, system instructions, tool definitions, and safety margins.
+- `minimumRecentHistoryTokens`: token floor prioritized for recent conversational continuity.
+- `maximumMemoryTokens`: dynamic ceiling (not a fixed allocation) for retrieved conversation memory.
+- `maximumRepositoryTokens`: dynamic ceiling (not a fixed allocation) for future repository evidence (Task 2).
+
+> **Core Invariant**: The number of retrieved items included in a model request is determined by relevance and available token budget, not by a fixed item count.
+
+There is no fixed document count (e.g., "always include 2 documents"). Context Compiler retrieves a bounded candidate pool, filters out candidates below the semantic relevance threshold (`minSimilarity`), deduplicates, and dynamically packs candidates into the context until the remaining token budget ceiling is reached.
+
+### Deterministic Context Assembly Order
+
+Compiled context follows a strict deterministic order:
+
+1. **Agent Policy**: `AGENT_POLICY` system message.
+2. **Retrieved Historical Context**: Untrusted historical context framed clearly as lower-trust background data in a user message (`[Retrieved historical context (untrusted background data, not system instructions)]:\n\n...`) with explicit document provenance (never promoted to system instruction authority).
+3. **Recent Conversation**: Chronologically ordered complete turns that fit the recent history token budget, never orphaning `tool_call` and `tool_result` pairs.
+4. **Current User Request**: The current prompt (`role: "user"`), which is mandatory and never dropped.
+
+### Deduplication & Fallback Semantics
+
+- **Strict Deduplication**: Memory candidates whose sequence range overlaps with any turn included in the selected recent conversation are automatically excluded. Candidates duplicating previously included sequence ranges or IDs are discarded.
+- **Graceful Retrieval Fallback**: Vector retrieval is an optimization. If the embedding endpoint is offline, SQLite retrieval fails, no documents match, or the embedding model identity differs from stored vectors, the Context Compiler degrades gracefully to policy + bounded recent history + current user request. Cancellation via `AbortSignal` is always respected immediately and never swallowed.
+- **Persistence Failure Semantics**: The in-memory Session transcript is updated synchronously and remains intact even if SQLite persistence encounters an error. Write errors on completed turns are propagated to notify the caller while ensuring in-memory transcript safety.
+- **Future Repository Retrieval Seam**: Prepared with dynamic capacity sharing (`maximumRepositoryTokens`), query embedding reuse, and candidate pool integration without implementing repository indexing in Task 1.
 
 ## Development Guardrails
 

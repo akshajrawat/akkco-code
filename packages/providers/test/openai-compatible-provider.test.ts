@@ -1028,3 +1028,131 @@ test("Cancels generation via AbortSignal", async () => {
         },
     );
 });
+
+test("F-004: Native multiple tool calls serialized as single assistant message on wire", () => {
+    const request: ModelRequest = {
+        items: [
+            { type: "message", role: "user", content: "Check two files" },
+            {
+                type: "message",
+                role: "assistant",
+                content: "I will check both files now.",
+            },
+            {
+                type: "tool_call",
+                id: "call_1",
+                name: "read_file",
+                arguments: { path: "a.txt" },
+            },
+            {
+                type: "tool_call",
+                id: "call_2",
+                name: "read_file",
+                arguments: { path: "b.txt" },
+            },
+            {
+                type: "tool_result",
+                callId: "call_1",
+                content: "content of a",
+            },
+            {
+                type: "tool_result",
+                callId: "call_2",
+                content: "content of b",
+            },
+        ],
+    };
+
+    const payload = mapModelRequestToOpenAIPayload(request, "gpt-4o");
+
+    // Must have 4 messages: user, assistant (with BOTH tool calls and prose content), tool 1, tool 2
+    assert.strictEqual(payload.messages.length, 4);
+
+    assert.strictEqual(payload.messages[0].role, "user");
+    assert.strictEqual(payload.messages[0].content, "Check two files");
+
+    // Assistant message contains the prose AND both tool calls
+    const assistantMsg = payload.messages[1] as any;
+    assert.strictEqual(assistantMsg.role, "assistant");
+    assert.strictEqual(assistantMsg.content, "I will check both files now.");
+    assert.strictEqual(Array.isArray(assistantMsg.tool_calls), true);
+    assert.strictEqual(assistantMsg.tool_calls.length, 2);
+    assert.strictEqual(assistantMsg.tool_calls[0].id, "call_1");
+    assert.strictEqual(assistantMsg.tool_calls[0].function.name, "read_file");
+    assert.strictEqual(assistantMsg.tool_calls[1].id, "call_2");
+    assert.strictEqual(assistantMsg.tool_calls[1].function.name, "read_file");
+
+    // Tool results follow immediately
+    const toolMsg1 = payload.messages[2] as any;
+    assert.strictEqual(toolMsg1.role, "tool");
+    assert.strictEqual(toolMsg1.tool_call_id, "call_1");
+    assert.strictEqual(toolMsg1.content, "content of a");
+
+    const toolMsg2 = payload.messages[3] as any;
+    assert.strictEqual(toolMsg2.role, "tool");
+    assert.strictEqual(toolMsg2.tool_call_id, "call_2");
+    assert.strictEqual(toolMsg2.content, "content of b");
+});
+
+test("F-004: Native multiple tool calls with no preceding text serializes content as null", () => {
+    const request: ModelRequest = {
+        items: [
+            { type: "message", role: "user", content: "Run tools directly" },
+            {
+                type: "tool_call",
+                id: "call_1",
+                name: "tool_a",
+                arguments: {},
+            },
+            {
+                type: "tool_call",
+                id: "call_2",
+                name: "tool_b",
+                arguments: {},
+            },
+            {
+                type: "tool_result",
+                callId: "call_1",
+                content: "res_a",
+            },
+            {
+                type: "tool_result",
+                callId: "call_2",
+                content: "res_b",
+            },
+        ],
+    };
+
+    const payload = mapModelRequestToOpenAIPayload(request, "gpt-4o");
+
+    assert.strictEqual(payload.messages.length, 4);
+    const assistantMsg = payload.messages[1] as any;
+    assert.strictEqual(assistantMsg.role, "assistant");
+    assert.strictEqual(assistantMsg.content, null);
+    assert.strictEqual(assistantMsg.tool_calls.length, 2);
+});
+
+test("F-005: Cancellation with pre-buffered SSE stream (including [DONE]) terminates with AbortError", async () => {
+    // Exact Codex audit reproduction: entire SSE stream including [DONE] is delivered in one chunk,
+    // but the AbortController signal is aborted during/before consumption.
+    const controller = new AbortController();
+    controller.abort();
+
+    const fullSseChunk =
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "partial text" } }] })}\n\n` +
+        `data: [DONE]\n\n`;
+
+    const bodyStream = (async function* () {
+        yield new TextEncoder().encode(fullSseChunk);
+    })();
+
+    const { parseOpenAIEventStream } = await import("../src/openai-compatible/stream-parser.js");
+
+    await assert.rejects(
+        async () => {
+            for await (const _ of parseOpenAIEventStream(bodyStream, controller.signal)) {
+            }
+        },
+        (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
+    );
+});

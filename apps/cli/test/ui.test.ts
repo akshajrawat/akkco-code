@@ -622,3 +622,27 @@ test("interrupt, exit, and disposal discard queued turns", async () => {
         }
     }
 });
+
+test("F-020: PromptInput handles large pastes (250k chars) without RangeError call stack overflow", async () => {
+    const terminal = mount(80, 24);
+    try {
+        const largeText = "a".repeat(250_000);
+        // Bracketed paste
+        terminal.input.write(`\x1b[200~${largeText}\x1b[201~`);
+        terminal.input.write("\r");
+
+        // Wait for prompt submission to occur without throwing
+        await waitFor(() => {
+            const history = terminal.controller.getSnapshot().history;
+            return history.some(
+                (item) => item.type === "message" && item.content.length === 250_000,
+            );
+        });
+
+        const history = terminal.controller.getSnapshot().history;
+        assert.equal(history[0].type, "message");
+        assert.equal((history[0] as any).content.length, 250_000);
+    } finally {
+        terminal.cleanup();
+    }
+});

@@ -204,3 +204,25 @@ test("search_text rejects Windows-style absolute drive path", async () => {
         await cleanup();
     }
 });
+
+test("F-018: search_text enforces output byte limit and indicates byte truncation", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const fileA = path.join(repoRoot, "large_matches.txt");
+        // Create 10 lines of 50 chars each matching "TARGET"
+        const lines = Array.from(
+            { length: 10 },
+            (_, i) => `TARGET line ${i} with extra padding 1234567890`,
+        );
+        await fs.writeFile(fileA, lines.join("\n"), "utf-8");
+
+        // Tool configured with 80-byte max output
+        const tool = createSearchTextTool(repoRoot, { maxOutputBytes: 80 });
+        const result = await tool.execute({ query: "TARGET" });
+
+        assert.match(result.content, /TARGET/);
+        assert.match(result.content, /\[Results truncated: maximum 80 bytes reached\]/);
+    } finally {
+        await cleanup();
+    }
+});

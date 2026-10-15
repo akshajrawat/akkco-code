@@ -89,3 +89,29 @@ test("DeterministicFakeEmbeddingProvider: exposes embedding identity", () => {
     assert.equal(provider.model, "fake-v1");
     assert.equal(provider.dimensions, 32);
 });
+
+test("F-023: DeterministicFakeEmbeddingProvider: semantic rules with /g regex flag maintain determinism across repeated calls", async () => {
+    const ruleVector = [0, 1, 0, 0];
+    const provider = new DeterministicFakeEmbeddingProvider({
+        dimensions: 4,
+        semanticRules: [
+            {
+                pattern: /architecture/gi, // global flag!
+                vector: ruleVector,
+            },
+        ],
+    });
+
+    // Call 1
+    const [res1] = await provider.embed(["Architecture decision A"]);
+    assert.deepEqual(res1, ruleVector);
+
+    // Call 2 (before fix, lastIndex > 0 caused this to fail!)
+    const [res2] = await provider.embed(["Architecture decision B"]);
+    assert.deepEqual(res2, ruleVector);
+
+    // Call 3 in a batch
+    const [b1, b2] = await provider.embed(["Architecture decision C", "Architecture decision D"]);
+    assert.deepEqual(b1, ruleVector);
+    assert.deepEqual(b2, ruleVector);
+});

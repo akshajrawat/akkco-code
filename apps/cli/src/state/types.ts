@@ -1,4 +1,9 @@
-import type { RuntimeReliabilityOptions, RuntimeToolExecutionEvent } from "@akkco/core";
+import type {
+    ContextCompiler,
+    RuntimeReliabilityOptions,
+    RuntimeToolExecutionEvent,
+    SessionPersistence,
+} from "@akkco/core";
 import type { ModelProvider } from "@akkco/models";
 import type { CommandRegistry } from "../commands/command-registry.js";
 import type { ToolRegistry } from "@akkco/tools";
@@ -8,6 +13,9 @@ export interface CliControllerOptions {
     toolRegistry: ToolRegistry;
     commandRegistry?: CommandRegistry;
     reliabilityOptions?: RuntimeReliabilityOptions;
+    compiler?: ContextCompiler;
+    persistence?: SessionPersistence;
+    sessionId?: string;
 }
 
 export type NoticeKind = "info" | "error" | "warning";

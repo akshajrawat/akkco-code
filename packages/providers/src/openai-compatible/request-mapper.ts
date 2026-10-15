@@ -54,11 +54,19 @@ const serializeArguments = (args: unknown): string => JSON.stringify(args ?? {})
 
 export const mapModelItemToOpenAIMessage = (item: ModelItem): OpenAIMessage => {
     switch (item.type) {
-        case "message":
+        case "message": {
+            const role =
+                item.role === "system" &&
+                (item.isPolicy === false ||
+                    item.provenance?.source === "memory" ||
+                    item.provenance?.source === "repository")
+                    ? "user"
+                    : item.role;
             return {
-                role: item.role,
+                role,
                 content: item.content,
             };
+        }
         case "tool_call":
             return {
                 role: "assistant",
@@ -83,6 +91,105 @@ export const mapModelItemToOpenAIMessage = (item: ModelItem): OpenAIMessage => {
     }
 };
 
+export const mapModelItemsToOpenAIMessages = (items: readonly ModelItem[]): OpenAIMessage[] => {
+    const messages: OpenAIMessage[] = [];
+    let i = 0;
+
+    while (i < items.length) {
+        const item = items[i];
+
+        if (item.type === "message") {
+            if (item.role === "assistant") {
+                const toolCalls: OpenAIToolCall[] = [];
+                let j = i + 1;
+                while (j < items.length && items[j].type === "tool_call") {
+                    const tc = items[j] as ModelToolCall;
+                    toolCalls.push({
+                        id: tc.id,
+                        type: "function",
+                        function: {
+                            name: tc.name,
+                            arguments: serializeArguments(tc.arguments),
+                        },
+                    });
+                    j++;
+                }
+
+                if (toolCalls.length > 0) {
+                    messages.push({
+                        role: "assistant",
+                        content: item.content || null,
+                        tool_calls: toolCalls,
+                    });
+                    i = j;
+                    continue;
+                }
+
+                messages.push({
+                    role: "assistant",
+                    content: item.content,
+                });
+                i++;
+                continue;
+            }
+
+            const role =
+                item.role === "system" &&
+                (item.isPolicy === false ||
+                    item.provenance?.source === "memory" ||
+                    item.provenance?.source === "repository")
+                    ? "user"
+                    : item.role;
+
+            messages.push({
+                role,
+                content: item.content,
+            });
+            i++;
+            continue;
+        }
+
+        if (item.type === "tool_call") {
+            const toolCalls: OpenAIToolCall[] = [];
+            let j = i;
+            while (j < items.length && items[j].type === "tool_call") {
+                const tc = items[j] as ModelToolCall;
+                toolCalls.push({
+                    id: tc.id,
+                    type: "function",
+                    function: {
+                        name: tc.name,
+                        arguments: serializeArguments(tc.arguments),
+                    },
+                });
+                j++;
+            }
+
+            messages.push({
+                role: "assistant",
+                content: null,
+                tool_calls: toolCalls,
+            });
+            i = j;
+            continue;
+        }
+
+        if (item.type === "tool_result") {
+            messages.push({
+                role: "tool",
+                tool_call_id: item.callId,
+                content: item.content,
+            });
+            i++;
+            continue;
+        }
+
+        i++;
+    }
+
+    return messages;
+};
+
 export const mapModelToolsToOpenAITools = (tools: ModelTool[]): OpenAITool[] =>
     tools.map((tool) => ({
         type: "function",
@@ -99,7 +206,7 @@ export const mapModelRequestToOpenAIPayload = (
 ): OpenAIRequestBody => {
     const payload: OpenAIRequestBody = {
         model,
-        messages: request.items.map(mapModelItemToOpenAIMessage),
+        messages: mapModelItemsToOpenAIMessages(request.items),
         stream: true,
     };
 

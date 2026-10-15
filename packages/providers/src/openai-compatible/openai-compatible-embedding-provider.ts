@@ -77,40 +77,59 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             throw new Error("Malformed OpenAI embedding response: missing or invalid 'data' array");
         }
 
-        const data = (json as { data: Array<{ index?: number; embedding?: unknown }> }).data;
+        const data = (json as { data: Array<{ index?: unknown; embedding?: unknown }> }).data;
         if (data.length !== inputs.length) {
             throw new Error(
                 `OpenAI embedding response count mismatch: expected ${inputs.length}, got ${data.length}`,
             );
         }
 
-        const sorted = [...data].sort((a, b) => {
-            const aIdx = typeof a.index === "number" ? a.index : 0;
-            const bIdx = typeof b.index === "number" ? b.index : 0;
-            return aIdx - bIdx;
-        });
-
-        const results: number[][] = [];
+        const seenIndices = new Set<number>();
+        const mappedResults: (number[] | undefined)[] = new Array(inputs.length);
         let expectedDim: number | undefined = this.dimensions;
 
-        for (let i = 0; i < sorted.length; i++) {
-            const item = sorted[i];
-            if (!item || !Array.isArray(item.embedding)) {
+        for (let i = 0; i < data.length; i++) {
+            const item = data[i];
+            if (!item || typeof item !== "object") {
                 throw new Error(
-                    `Malformed OpenAI embedding response item at index ${i}: missing or invalid 'embedding' array`,
+                    `Malformed OpenAI embedding response item at position ${i}: not an object`,
+                );
+            }
+
+            const idx = item.index;
+            if (typeof idx !== "number" || !Number.isInteger(idx)) {
+                throw new Error(
+                    `Malformed OpenAI embedding response item at position ${i}: index must be an integer, got ${String(idx)}`,
+                );
+            }
+
+            if (idx < 0 || idx >= inputs.length) {
+                throw new Error(
+                    `OpenAI embedding response item at position ${i} has out-of-range index ${idx} (expected 0 <= index < ${inputs.length})`,
+                );
+            }
+
+            if (seenIndices.has(idx)) {
+                throw new Error(`OpenAI embedding response contains duplicate index ${idx}`);
+            }
+            seenIndices.add(idx);
+
+            if (!Array.isArray(item.embedding)) {
+                throw new Error(
+                    `Malformed OpenAI embedding response item with index ${idx}: missing or invalid 'embedding' array`,
                 );
             }
 
             const vec = item.embedding;
             if (vec.length === 0) {
-                throw new Error(`Embedding vector at index ${i} is empty`);
+                throw new Error(`Embedding vector at index ${idx} is empty`);
             }
 
             if (expectedDim === undefined) {
                 expectedDim = vec.length;
             } else if (vec.length !== expectedDim) {
                 throw new Error(
-                    `Inconsistent embedding dimensions: expected ${expectedDim}, got ${vec.length} at index ${i}`,
+                    `Inconsistent embedding dimensions: expected ${expectedDim}, got ${vec.length} at index ${idx}`,
                 );
             }
 
@@ -118,14 +137,20 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 const val = vec[j];
                 if (typeof val !== "number" || !Number.isFinite(val)) {
                     throw new Error(
-                        `Non-finite value in embedding vector at index ${i}, dimension ${j}`,
+                        `Non-finite value in embedding vector at index ${idx}, dimension ${j}`,
                     );
                 }
             }
 
-            results.push(vec as number[]);
+            mappedResults[idx] = vec as number[];
         }
 
-        return results;
+        for (let i = 0; i < inputs.length; i++) {
+            if (mappedResults[i] === undefined) {
+                throw new Error(`Missing embedding vector for input index ${i}`);
+            }
+        }
+
+        return mappedResults as number[][];
     };
 }

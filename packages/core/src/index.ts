@@ -9,8 +9,19 @@ export {
     type ContextCompileInput,
     type ContextCompiler,
 } from "./context/bounded-context-compiler.js";
-export { type ContextBudget, DEFAULT_CONTEXT_BUDGET } from "./context/budget.js";
-export { estimateTokens } from "./context/token-estimator.js";
+export {
+    type ContextBudget,
+    DEFAULT_CONTEXT_BUDGET,
+    validateContextBudget,
+} from "./context/budget.js";
+export {
+    prepareBoundedModelRequest,
+    ContextBudgetOverflowError,
+    estimateToolsTokens,
+    estimateRequestTokens,
+    type PrepareBoundedModelRequestOptions,
+} from "./context/request-preparer.js";
+export { estimateTokens, estimateModelItemTokens } from "./context/token-estimator.js";
 export {
     createMemoryDocumentFromTurn,
     deriveMemoryDocumentsFromTranscript,

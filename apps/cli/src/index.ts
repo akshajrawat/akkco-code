@@ -8,6 +8,23 @@ import { runPlainCli } from "./plain-cli.js";
 import { createCliController } from "./state/cli-controller.js";
 import type { CliMetadata } from "./state/types.js";
 
+const origEmitWarning = process.emitWarning;
+process.emitWarning = function (warning: string | Error, ...args: unknown[]) {
+    if (typeof warning === "string" && warning.includes("SQLite")) {
+        return;
+    }
+    if (
+        warning &&
+        typeof warning === "object" &&
+        "message" in warning &&
+        typeof (warning as { message: unknown }).message === "string" &&
+        (warning as { message: string }).message.includes("SQLite")
+    ) {
+        return;
+    }
+    return Reflect.apply(origEmitWarning, process, [warning, ...args]);
+};
+
 const main = async () => {
     const toolMode = parseToolMode(process.env.AKKCO_TOOL_MODE);
     const maxToolIterations = parseMaxToolIterations(process.env.AKKCO_MAX_TOOL_ITERATIONS);
@@ -31,15 +48,96 @@ const main = async () => {
         });
     }
 
+    const { prepareBoundedModelRequest, DEFAULT_CONTEXT_BUDGET } = await import("@akkco/core");
+
     const provider =
         toolMode === "compatibility"
-            ? createTextToolCompatibilityProvider(nativeProvider)
+            ? createTextToolCompatibilityProvider(nativeProvider, {
+                  prepareRequest: (req) =>
+                      prepareBoundedModelRequest({
+                          request: req,
+                          budget: DEFAULT_CONTEXT_BUDGET,
+                      }),
+              })
             : nativeProvider;
+
+    const isTestMode = Boolean(
+        process.env.AKKCO_TEST_PROVIDER ||
+        process.env.NODE_ENV === "test" ||
+        process.env.NODE_TEST_CONTEXT,
+    );
+
+    const dbPath =
+        process.env.AKKCO_DB_PATH ??
+        (isTestMode
+            ? ":memory:"
+            : (await import("node:path")).join(
+                  (await import("node:os")).homedir(),
+                  ".akkco",
+                  "akkco.db",
+              ));
+
+    let store: import("@akkco/retrieval").SqliteConversationStore | undefined;
+    let orchestrator: import("@akkco/core").ConversationMemoryOrchestrator | undefined;
+    let retriever: import("@akkco/core").DefaultConversationMemoryRetriever | undefined;
+
+    const { SqliteConversationStore } = await import("@akkco/retrieval");
+    store = new SqliteConversationStore({ dbPath });
+    try {
+        await store.initialize();
+    } catch (error) {
+        if (dbPath === ":memory:" || process.env.AKKCO_ALLOW_EPHEMERAL === "true") {
+            store = undefined;
+        } else {
+            throw new Error(
+                `Failed to initialize SQLite database at "${dbPath}": ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+
+    if (store) {
+        let embeddingProvider: import("@akkco/models").EmbeddingProvider | undefined;
+        try {
+            if (process.env.AKKCO_TEST_PROVIDER) {
+                const { DeterministicFakeEmbeddingProvider } =
+                    await import("@akkco/models/testing");
+                embeddingProvider = new DeterministicFakeEmbeddingProvider();
+            } else if (process.env.AKKCO_EMBEDDING_MODEL) {
+                const { OpenAICompatibleEmbeddingProvider } = await import("@akkco/providers");
+                embeddingProvider = new OpenAICompatibleEmbeddingProvider({
+                    baseUrl:
+                        process.env.AKKCO_EMBEDDING_BASE_URL ??
+                        process.env.AKKCO_BASE_URL ??
+                        "http://localhost:11434/v1",
+                    model: process.env.AKKCO_EMBEDDING_MODEL,
+                    apiKey: process.env.AKKCO_EMBEDDING_API_KEY ?? process.env.AKKCO_API_KEY,
+                });
+            }
+        } catch {
+            // Graceful degradation: embedding provider setup error falls back to keyword memory
+        }
+
+        const { ConversationMemoryOrchestrator, DefaultConversationMemoryRetriever } =
+            await import("@akkco/core");
+        orchestrator = new ConversationMemoryOrchestrator(store, embeddingProvider);
+        retriever = new DefaultConversationMemoryRetriever(store, embeddingProvider);
+    }
+
+    const sessionId = process.env.AKKCO_SESSION_ID ?? (await import("node:crypto")).randomUUID();
+    const { createBoundedContextCompiler } = await import("@akkco/core");
+    const compiler = createBoundedContextCompiler({
+        budget: DEFAULT_CONTEXT_BUDGET,
+        memoryRetriever: retriever,
+        sessionId,
+    });
 
     const controller = createCliController({
         provider,
         toolRegistry: createToolRegistry(createRepositoryTools(process.cwd())),
         reliabilityOptions: maxToolIterations !== undefined ? { maxToolIterations } : undefined,
+        compiler,
+        persistence: orchestrator,
+        sessionId,
     });
 
     const manifest = JSON.parse(
@@ -54,7 +152,16 @@ const main = async () => {
         cwd: process.cwd(),
     };
 
-    process.on("SIGINT", controller.interrupt);
+    const onSigint = () => {
+        controller.interrupt();
+    };
+    const onSigterm = () => {
+        controller.interrupt();
+        void controller.dispose();
+    };
+
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
 
     try {
         if (
@@ -69,8 +176,11 @@ const main = async () => {
             await runPlainCli(controller, metadata);
         }
     } finally {
-        process.off("SIGINT", controller.interrupt);
-        controller.dispose();
+        process.off("SIGINT", onSigint);
+        process.off("SIGTERM", onSigterm);
+        await controller.dispose();
+        await orchestrator?.waitForPendingIndexing(2000);
+        await store?.close().catch(() => {});
     }
 };
 

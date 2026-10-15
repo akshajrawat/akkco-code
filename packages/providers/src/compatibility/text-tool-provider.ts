@@ -31,10 +31,17 @@ interface ReadTurnResult {
     nativeToolCallEmitted: boolean;
 }
 
+export interface TextToolCompatibilityProviderOptions {
+    readonly prepareRequest?: (request: ModelRequest) => ModelRequest;
+}
+
 export class TextToolCompatibilityProvider implements ModelProvider {
     readonly id: string;
 
-    constructor(private readonly provider: ModelProvider) {
+    constructor(
+        private readonly provider: ModelProvider,
+        private readonly options?: TextToolCompatibilityProviderOptions,
+    ) {
         this.id = `${provider.id}-compatibility`;
     }
 
@@ -214,7 +221,11 @@ export class TextToolCompatibilityProvider implements ModelProvider {
                     signal: request.signal,
                 };
 
-                const turn2 = yield* self.readTurn(repairRequest);
+                const boundedRepairRequest = self.options?.prepareRequest
+                    ? self.options.prepareRequest(repairRequest)
+                    : repairRequest;
+
+                const turn2 = yield* self.readTurn(boundedRepairRequest);
                 if (turn2.nativeToolCallEmitted) {
                     return;
                 }
@@ -255,5 +266,7 @@ export class TextToolCompatibilityProvider implements ModelProvider {
     };
 }
 
-export const createTextToolCompatibilityProvider = (provider: ModelProvider): ModelProvider =>
-    new TextToolCompatibilityProvider(provider);
+export const createTextToolCompatibilityProvider = (
+    provider: ModelProvider,
+    options?: TextToolCompatibilityProviderOptions,
+): ModelProvider => new TextToolCompatibilityProvider(provider, options);

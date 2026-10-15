@@ -3,7 +3,6 @@ import { toModelTools } from "@akkco/tools";
 import {
     type CommandContext,
     type CommandMetadata,
-    type CommandRegistry,
     createBuiltinCommandRegistry,
 } from "../commands/command-registry.js";
 import type {
@@ -18,6 +17,9 @@ export const createCliController = ({
     toolRegistry,
     commandRegistry = createBuiltinCommandRegistry(),
     reliabilityOptions,
+    compiler,
+    persistence,
+    sessionId,
 }: CliControllerOptions) => {
     let state: CliViewState = {
         history: [],
@@ -86,21 +88,30 @@ export const createCliController = ({
         });
     };
 
-    const session = new Session(
-        createAkkcoRuntime(
-            provider,
+    const createSessionInstance = (id?: string) =>
+        new Session(
+            createAkkcoRuntime(
+                provider,
+                {
+                    get tools() {
+                        return toModelTools(toolRegistry.list());
+                    },
+                    execute: async (name, input) => {
+                        startTool(name, input);
+                        return toolRegistry.execute(name, input);
+                    },
+                },
+                reliabilityOptions,
+            ),
+            [],
             {
-                get tools() {
-                    return toModelTools(toolRegistry.list());
-                },
-                execute: async (name, input) => {
-                    startTool(name, input);
-                    return toolRegistry.execute(name, input);
-                },
+                id: id ?? crypto.randomUUID(),
+                compiler,
+                persistence,
             },
-            reliabilityOptions,
-        ),
-    );
+        );
+
+    let session = createSessionInstance(sessionId);
 
     const exit = (farewell = true) => {
         if (state.exited) {
@@ -130,7 +141,12 @@ export const createCliController = ({
     };
 
     const commandContext: CommandContext = {
-        session,
+        get session() {
+            return session;
+        },
+        resetSession: () => {
+            session = createSessionInstance();
+        },
         toolRegistry,
 
         appendHistory: (item) => {
@@ -165,6 +181,8 @@ export const createCliController = ({
         },
     };
 
+    let activeTurnPromise: Promise<void> | null = null;
+
     const submit = async (input: string) => {
         if (state.exited) {
             return;
@@ -182,81 +200,94 @@ export const createCliController = ({
             return;
         }
 
-        const abort = new AbortController();
-        activeAbort = abort;
+        const runTurn = async () => {
+            const abort = new AbortController();
+            activeAbort = abort;
 
-        // Lock synchronously, including while an asynchronous command is executing.
-        update({ status: "generating", outcome: undefined });
-
-        try {
-            if (await commandRegistry.dispatch(input.trim(), commandContext)) {
-                return;
-            }
-
-            append({ id: nextId++, type: "message", role: "user", content: input });
+            // Lock synchronously, including while an asynchronous command is executing.
+            update({ status: "generating", outcome: undefined });
 
             try {
-                for await (const event of session.send(input, abort.signal)) {
-                    if (state.exited) {
-                        break;
-                    }
-
-                    if (event.type === "text") {
-                        update({ assistantText: state.assistantText + event.content });
-                        emit({ type: "text", content: event.content });
-                    } else {
-                        commitAssistant();
-                        update({ activeTool: undefined, status: "generating" });
-                        append({ id: nextId++, type: "tool", execution: event });
-                    }
+                if (await commandRegistry.dispatch(input.trim(), commandContext)) {
+                    return;
                 }
 
-                if (abort.signal.aborted) {
-                    // Providers may end their stream normally after an abort.
+                append({ id: nextId++, type: "message", role: "user", content: input });
+
+                try {
+                    for await (const event of session.send(input, abort.signal)) {
+                        if (state.exited) {
+                            break;
+                        }
+
+                        if (event.type === "text") {
+                            update({ assistantText: state.assistantText + event.content });
+                            emit({ type: "text", content: event.content });
+                        } else {
+                            commitAssistant();
+                            update({ activeTool: undefined, status: "generating" });
+                            append({ id: nextId++, type: "tool", execution: event });
+                        }
+                    }
+
+                    if (abort.signal.aborted) {
+                        // Providers may end their stream normally after an abort.
+                        commitAssistant();
+                        notice("Generation cancelled.", "warning");
+                    }
+                } catch (error) {
                     commitAssistant();
-                    notice("Generation cancelled.", "warning");
+
+                    if (abort.signal.aborted) {
+                        if (state.activeTool) {
+                            append({
+                                id: nextId++,
+                                type: "tool",
+                                execution: { ...state.activeTool, status: "cancelled" },
+                            });
+                        }
+
+                        notice("Generation cancelled.", "warning");
+                    } else {
+                        notice(
+                            `Error: ${error instanceof Error ? error.message : String(error)}`,
+                            "error",
+                        );
+                    }
+                } finally {
+                    commitAssistant();
                 }
             } catch (error) {
-                commitAssistant();
-
-                if (abort.signal.aborted) {
-                    if (state.activeTool) {
-                        append({
-                            id: nextId++,
-                            type: "tool",
-                            execution: { ...state.activeTool, status: "cancelled" },
-                        });
-                    }
-
-                    notice("Generation cancelled.", "warning");
-                } else {
-                    notice(
-                        `Error: ${error instanceof Error ? error.message : String(error)}`,
-                        "error",
-                    );
-                }
+                notice(`Error: ${error instanceof Error ? error.message : String(error)}`, "error");
             } finally {
-                commitAssistant();
-            }
-        } catch (error) {
-            notice(`Error: ${error instanceof Error ? error.message : String(error)}`, "error");
-        } finally {
-            activeAbort = undefined;
-            const [nextPrompt, ...remaining] = state.queuedPrompts ?? [];
-            update({ status: "idle", activeTool: undefined, queuedPrompts: remaining });
+                activeAbort = undefined;
+                const [nextPrompt, ...remaining] = state.queuedPrompts ?? [];
+                update({ status: "idle", activeTool: undefined, queuedPrompts: remaining });
 
-            if (!state.exited) {
-                if (nextPrompt !== undefined) {
-                    await submit(nextPrompt);
-                } else {
-                    emit({ type: "idle" });
+                if (!state.exited) {
+                    if (nextPrompt !== undefined) {
+                        await submit(nextPrompt);
+                    } else {
+                        emit({ type: "idle" });
+                    }
                 }
+            }
+        };
+
+        const turnPromise = runTurn();
+        activeTurnPromise = turnPromise;
+        try {
+            await turnPromise;
+        } finally {
+            if (activeTurnPromise === turnPromise) {
+                activeTurnPromise = null;
             }
         }
     };
 
     return {
         getSnapshot: () => state,
+        getSession: () => session,
         getCommands: (): readonly CommandMetadata[] => commandRegistry.list(),
 
         subscribe: (subscriber: () => void) => {
@@ -280,8 +311,13 @@ export const createCliController = ({
         exit,
         notice,
 
-        dispose: () => {
+        dispose: async () => {
             exit(false);
+            if (activeTurnPromise) {
+                try {
+                    await activeTurnPromise;
+                } catch {}
+            }
             subscribers.clear();
             eventListeners.clear();
         },

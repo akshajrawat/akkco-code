@@ -106,9 +106,13 @@ export class DeterministicFakeEmbeddingProvider implements EmbeddingProvider {
                 continue;
             }
 
-            const matchedRule = this.semanticRules.find(({ pattern }) =>
-                typeof pattern === "string" ? input.includes(pattern) : pattern.test(input),
-            );
+            const matchedRule = this.semanticRules.find(({ pattern }) => {
+                if (typeof pattern === "string") {
+                    return input.includes(pattern);
+                }
+                pattern.lastIndex = 0;
+                return pattern.test(input);
+            });
 
             if (matchedRule) {
                 if (matchedRule.vector.length !== this.dimensions) {

@@ -179,7 +179,7 @@ test("compileContext: cancelled tool execution emits ModelToolCall and ModelTool
     ]);
 });
 
-test("compileContext: requested and running tool execution emits only ModelToolCall", () => {
+test("compileContext: requested and running tool execution reconciles with interrupted tool_result", () => {
     const requestedItem: ToolExecutionTranscriptItem = {
         type: "tool_execution",
         callId: "call_4",
@@ -204,12 +204,63 @@ test("compileContext: requested and running tool execution emits only ModelToolC
             arguments: { path: "." },
         },
         {
+            type: "tool_result",
+            callId: "call_4",
+            content: "Tool execution was interrupted before completion",
+            isError: true,
+        },
+        {
             type: "tool_call",
             id: "call_5",
             name: "list_files",
             arguments: { path: "src" },
         },
+        {
+            type: "tool_result",
+            callId: "call_5",
+            content: "Tool execution was interrupted before completion",
+            isError: true,
+        },
     ]);
+});
+
+test("compileContext F-017: incomplete tool record followed by interruption and new user message preserves valid sequencing", () => {
+    const transcript: TranscriptItem[] = [
+        { type: "user", content: "list files" },
+        {
+            type: "tool_execution",
+            callId: "call_incomplete",
+            toolName: "list_files",
+            arguments: { path: "." },
+            status: "running",
+        },
+        { type: "assistant", content: "", status: "interrupted" },
+        { type: "user", content: "new question" },
+    ];
+
+    const items = compileWithoutPolicy(transcript);
+
+    // Verify tool_call is reconciled before the interrupted notice and next user message
+    assert.strictEqual(items.length, 5);
+    assert.deepStrictEqual(items[0], { type: "message", role: "user", content: "list files" });
+    assert.deepStrictEqual(items[1], {
+        type: "tool_call",
+        id: "call_incomplete",
+        name: "list_files",
+        arguments: { path: "." },
+    });
+    assert.deepStrictEqual(items[2], {
+        type: "tool_result",
+        callId: "call_incomplete",
+        content: "Tool execution was interrupted before completion",
+        isError: true,
+    });
+    assert.deepStrictEqual(items[3], {
+        type: "message",
+        role: "system",
+        content: "[Previous assistant generation was interrupted before completion]",
+    });
+    assert.deepStrictEqual(items[4], { type: "message", role: "user", content: "new question" });
 });
 
 test("compileContext: durationMs and internal metadata are never exposed on ModelItem", () => {

@@ -12,8 +12,11 @@ const readFileInputSchema = z.object({
         ),
 });
 
+export const DEFAULT_MAX_READ_BYTES = 5 * 1024 * 1024; // 5 MB
+
 export const createReadFileTool = (
     repositoryRoot: string,
+    maxBytes: number = DEFAULT_MAX_READ_BYTES,
 ): ToolDefinition<typeof readFileInputSchema> => ({
     name: "read_file",
     description:
@@ -24,6 +27,14 @@ export const createReadFileTool = (
         const stats = await fs.stat(filePath);
         if (stats.isDirectory()) {
             throw new Error(`Cannot read path because it is a directory: ${input.path}`);
+        }
+        if (!stats.isFile()) {
+            throw new Error(`Cannot read path because it is not a regular file: ${input.path}`);
+        }
+        if (stats.size > maxBytes) {
+            throw new Error(
+                `File size (${stats.size} bytes) exceeds maximum readable size of ${maxBytes} bytes: ${input.path}`,
+            );
         }
         const content = await fs.readFile(filePath, "utf-8");
         return { content };

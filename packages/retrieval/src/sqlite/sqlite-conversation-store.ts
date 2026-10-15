@@ -22,6 +22,7 @@ export interface SqliteConversationStoreOptions {
 
 export class SqliteConversationStore implements ConversationStore {
     private db: DatabaseSync | null = null;
+    private initPromise: Promise<void> | null = null;
     private readonly dbPath: string;
     private readonly migrationsDir?: string;
 
@@ -42,22 +43,44 @@ export class SqliteConversationStore implements ConversationStore {
             return;
         }
 
-        if (this.dbPath !== ":memory:") {
-            await mkdir(dirname(this.dbPath), { recursive: true });
+        if (this.initPromise) {
+            return this.initPromise;
         }
 
-        const db = new DatabaseSync(this.dbPath, {
-            enableForeignKeyConstraints: true,
-        });
+        this.initPromise = (async () => {
+            if (this.dbPath !== ":memory:") {
+                await mkdir(dirname(this.dbPath), { recursive: true });
+            }
 
-        db.exec("PRAGMA foreign_keys = ON;");
-        db.exec("PRAGMA busy_timeout = 10000;");
+            const db = new DatabaseSync(this.dbPath, {
+                enableForeignKeyConstraints: true,
+            });
 
-        await migrateDatabase(db, { migrationsDir: this.migrationsDir });
-        this.db = db;
+            db.exec("PRAGMA foreign_keys = ON;");
+            db.exec("PRAGMA busy_timeout = 3000;");
+
+            try {
+                await migrateDatabase(db, { migrationsDir: this.migrationsDir });
+                this.db = db;
+            } catch (error) {
+                try {
+                    db.close();
+                } catch {}
+                throw error;
+            } finally {
+                this.initPromise = null;
+            }
+        })();
+
+        return this.initPromise;
     };
 
     close = async (): Promise<void> => {
+        if (this.initPromise) {
+            try {
+                await this.initPromise;
+            } catch {}
+        }
         if (this.db) {
             this.db.close();
             this.db = null;
@@ -126,21 +149,34 @@ export class SqliteConversationStore implements ConversationStore {
         const db = this.getDb();
         await this.saveSession({ id: sessionId });
 
-        db.exec("BEGIN");
+        db.exec("BEGIN IMMEDIATE");
         try {
-            const stmt = db.prepare(`
+            const checkStmt = db.prepare(`
+                SELECT type, payload FROM transcript_items
+                WHERE session_id = ? AND sequence = ?
+            `);
+            const insertStmt = db.prepare(`
                 INSERT INTO transcript_items (id, session_id, sequence, type, payload, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, sequence) DO UPDATE SET
-                    type = excluded.type,
-                    payload = excluded.payload,
-                    created_at = excluded.created_at
             `);
 
             const now = new Date().toISOString();
             for (const item of items) {
+                const existing = checkStmt.get(sessionId, item.sequence) as
+                    { type: string; payload: string } | undefined;
+
+                if (existing) {
+                    if (existing.type !== item.type || existing.payload !== item.payload) {
+                        throw new Error(
+                            `Transcript conflict in session "${sessionId}" at sequence ${item.sequence}: conflicting non-identical record`,
+                        );
+                    }
+                    // Identical payload: idempotent retry, preserve existing record
+                    continue;
+                }
+
                 const id = item.id ?? `${sessionId}:${item.sequence}`;
-                stmt.run(
+                insertStmt.run(
                     id,
                     sessionId,
                     item.sequence,
@@ -287,7 +323,8 @@ export class SqliteConversationStore implements ConversationStore {
         for (const row of rows) {
             if (
                 query.excludeSequenceRange &&
-                (!query.sessionId || row.session_id === query.sessionId)
+                query.sessionId &&
+                row.session_id === query.sessionId
             ) {
                 const overlaps = !(
                     row.end_sequence < query.excludeSequenceRange.start ||
@@ -298,7 +335,13 @@ export class SqliteConversationStore implements ConversationStore {
                 }
             }
 
-            const candidateVector = deserializeVector(row.embedding, row.embedding_dimensions);
+            let candidateVector: number[];
+            try {
+                candidateVector = deserializeVector(row.embedding, row.embedding_dimensions);
+            } catch {
+                // Isolate corrupt or invalid persisted vector so it does not disable retrieval of other valid memories
+                continue;
+            }
             const similarity = cosineSimilarity(query.vector, candidateVector);
 
             if (similarity <= 0) {

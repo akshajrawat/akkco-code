@@ -228,7 +228,9 @@ export const PromptInput = ({
 
             if (event.type !== "key") {
                 const inserted = Array.from(event.text);
-                current.characters.splice(current.cursor, 0, ...inserted);
+                const before = current.characters.slice(0, current.cursor);
+                const after = current.characters.slice(current.cursor);
+                current.characters = before.concat(inserted, after);
                 current.cursor += inserted.length;
             } else if (event.key === "enter") {
                 const value = current.characters.join("");

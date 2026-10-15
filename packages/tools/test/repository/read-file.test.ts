@@ -164,3 +164,23 @@ test("read_file allows a symlink inside repo pointing to a file inside repo", as
         await cleanup();
     }
 });
+
+test("F-018: read_file rejects files exceeding max read size limit", async () => {
+    const { repoRoot, cleanup } = await setupTestRepo();
+    try {
+        const largeFile = path.join(repoRoot, "large.txt");
+        await fs.writeFile(largeFile, "a".repeat(100), "utf-8");
+
+        // Tool configured with 50-byte max limit
+        const tool = createReadFileTool(repoRoot, 50);
+
+        await assert.rejects(
+            async () => {
+                await tool.execute({ path: "large.txt" });
+            },
+            { message: /exceeds maximum readable size of 50 bytes/i },
+        );
+    } finally {
+        await cleanup();
+    }
+});

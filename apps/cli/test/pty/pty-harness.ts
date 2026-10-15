@@ -66,14 +66,17 @@ export class PtyHarness {
     private readonly exitPromise: Promise<{ exitCode: number; signal?: number }>;
     private resolveExit!: (res: { exitCode: number; signal?: number }) => void;
 
+    private readonly cleanup?: () => void;
+
     constructor(
         ptyProcess: pty.IPty,
         terminal: TerminalInstance,
-        options: { defaultTimeoutMs?: number } = {},
+        options: { defaultTimeoutMs?: number; cleanup?: () => void } = {},
     ) {
         this.ptyProcess = ptyProcess;
         this.terminal = terminal;
         this.defaultTimeoutMs = options.defaultTimeoutMs ?? 8000;
+        this.cleanup = options.cleanup;
 
         this.exitPromise = new Promise((resolve) => {
             this.resolveExit = resolve;
@@ -207,6 +210,7 @@ export class PtyHarness {
             // Child process already terminated
         } finally {
             this.terminal.dispose();
+            this.cleanup?.();
         }
     };
 }
@@ -214,6 +218,11 @@ export class PtyHarness {
 export const startTui = async (options: PtyHarnessOptions = {}): Promise<PtyHarness> => {
     const columns = options.columns ?? 80;
     const rows = options.rows ?? 24;
+
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "akkco-pty-test-"));
+    const dbPath = path.join(tmpDir, "akkco-test.db");
 
     const repoRoot = path.resolve(import.meta.dirname, "../../../../");
     const tsxPath = path.resolve(repoRoot, "node_modules/tsx/dist/cli.mjs");
@@ -233,6 +242,7 @@ export const startTui = async (options: PtyHarnessOptions = {}): Promise<PtyHarn
         env: {
             ...process.env,
             AKKCO_TEST_PROVIDER: "1",
+            AKKCO_DB_PATH: options.env?.AKKCO_DB_PATH ?? dbPath,
             TERM: "xterm-256color",
             FORCE_COLOR: "1",
             ...options.env,
@@ -241,6 +251,13 @@ export const startTui = async (options: PtyHarnessOptions = {}): Promise<PtyHarn
 
     const harness = new PtyHarness(ptyProcess, terminal, {
         defaultTimeoutMs: options.defaultTimeoutMs,
+        cleanup: () => {
+            try {
+                fs.rmSync(tmpDir, { recursive: true, force: true });
+            } catch {
+                // Ignore cleanup error
+            }
+        },
     });
 
     // Wait until startup completes and initial prompt appears

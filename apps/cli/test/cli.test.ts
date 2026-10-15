@@ -15,6 +15,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.resolve(__dirname, "../src/index.ts");
 const tsxBin = path.resolve(__dirname, "../../../node_modules/.bin/tsx");
 
+process.env.AKKCO_DB_PATH = process.env.AKKCO_DB_PATH ?? ":memory:";
+
 const waitForOutput = async (predicate: () => boolean, timeoutMs = 5000) => {
     const start = Date.now();
     while (!predicate()) {
@@ -763,4 +765,114 @@ test("Runtime integration preserves assistant pre-tool text before tool executio
     assert.match(assistantMsg.content, /^I will inspect the file\.\n\n<akkco_tool_call>/);
     assert.match(assistantMsg.content, /"name":"read_file"/);
     assert.match(assistantMsg.content, /<\/akkco_tool_call>$/);
+});
+
+test("F-019: CLI in test mode uses in-memory database and never creates ~/.akkco/akkco.db", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "akkco-test-home-"));
+
+    try {
+        const cp = spawn(tsxBin, [cliEntry], {
+            env: {
+                ...process.env,
+                HOME: tempHome,
+                AKKCO_TEST_PROVIDER: "1",
+                AKKCO_DB_PATH: undefined, // Explicitly unset
+            },
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        let output = "";
+        cp.stdout.on("data", (d) => (output += d.toString()));
+        cp.stderr.on("data", (d) => (output += d.toString()));
+
+        await waitForOutput(() => output.includes("> "));
+
+        // Send /exit
+        cp.stdin.write("/exit\n");
+        await waitForExit(cp);
+
+        // Verify ~/.akkco/akkco.db was NEVER created
+        const dbDir = path.join(tempHome, ".akkco");
+        const exists = await fs
+            .access(dbDir)
+            .then(() => true)
+            .catch(() => false);
+        assert.strictEqual(
+            exists,
+            false,
+            "Expected ~/.akkco directory NOT to be created in test mode",
+        );
+    } finally {
+        await fs.rm(tempHome, { recursive: true, force: true });
+    }
+});
+
+test("F-007: CLI startup fails fast with clear diagnostic when durable SQLite cannot initialize", async () => {
+    // Pass an invalid db path that cannot be created (e.g. file acting as directory)
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "akkco-fail-db-"));
+    const blockerFile = path.join(tempDir, "blocker");
+    await fs.writeFile(blockerFile, "I am a file, not a directory");
+    const impossibleDbPath = path.join(blockerFile, "nested", "akkco.db");
+
+    try {
+        const cp = spawn(tsxBin, [cliEntry], {
+            env: {
+                ...process.env,
+                AKKCO_TEST_PROVIDER: "1",
+                AKKCO_DB_PATH: impossibleDbPath,
+            },
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        let output = "";
+        cp.stdout.on("data", (d) => (output += d.toString()));
+        cp.stderr.on("data", (d) => (output += d.toString()));
+
+        const exitCode = await waitForExit(cp);
+        assert.notStrictEqual(
+            exitCode,
+            0,
+            "CLI should exit with non-zero status on durable DB failure",
+        );
+        assert.match(output, /Failed to initialize SQLite database/i);
+    } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("F-008: Coordinated shutdown awaits in-flight session finalization before disposing", async () => {
+    let finalized = false;
+    const fakePersistence = {
+        saveTranscriptItems: async () => {
+            await new Promise((r) => setTimeout(r, 40));
+            finalized = true;
+        },
+    };
+
+    const fakeProvider: ModelProvider = {
+        id: "mock",
+        async *stream() {
+            yield { type: "text", content: "Running stream" };
+            await new Promise((r) => setTimeout(r, 100));
+        },
+    };
+
+    const controller = createCliController({
+        provider: fakeProvider,
+        toolRegistry: createToolRegistry(),
+        persistence: fakePersistence as any,
+    });
+
+    const submitPromise = controller.submit("test query");
+    // While submit is executing, call dispose
+    await new Promise((r) => setTimeout(r, 20));
+    await controller.dispose();
+    await submitPromise;
+
+    // Active session finalization (saveTranscriptItems) was awaited
+    assert.strictEqual(finalized, true);
 });

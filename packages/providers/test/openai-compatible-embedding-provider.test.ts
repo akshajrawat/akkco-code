@@ -203,3 +203,170 @@ test("OpenAICompatibleEmbeddingProvider: supports AbortSignal cancellation", asy
         { name: "AbortError" },
     );
 });
+
+test("F-013: OpenAICompatibleEmbeddingProvider: rejects duplicate indices", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({
+                data: [
+                    { index: 0, embedding: [1, 2] },
+                    { index: 0, embedding: [3, 4] },
+                ],
+            }),
+        );
+
+    try {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            baseUrl: "http://localhost:11434/v1",
+            model: "test-model",
+        });
+
+        await assert.rejects(
+            async () => {
+                await provider.embed(["test 1", "test 2"]);
+            },
+            { message: /duplicate index/i },
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("F-013: OpenAICompatibleEmbeddingProvider: rejects missing indices", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({
+                data: [
+                    { index: 0, embedding: [1, 2] },
+                    // index 1 missing, index 2 instead with 2 inputs -> index 2 is out of range or missing
+                    { index: 2, embedding: [3, 4] },
+                ],
+            }),
+        );
+
+    try {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            baseUrl: "http://localhost:11434/v1",
+            model: "test-model",
+        });
+
+        await assert.rejects(
+            async () => {
+                await provider.embed(["test 1", "test 2"]);
+            },
+            { message: /out-of-range index|Missing embedding vector/i },
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("F-013: OpenAICompatibleEmbeddingProvider: rejects negative indices", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({
+                data: [{ index: -1, embedding: [1, 2] }],
+            }),
+        );
+
+    try {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            baseUrl: "http://localhost:11434/v1",
+            model: "test-model",
+        });
+
+        await assert.rejects(
+            async () => {
+                await provider.embed(["test 1"]);
+            },
+            { message: /out-of-range index/i },
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("F-013: OpenAICompatibleEmbeddingProvider: rejects out-of-range indices", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({
+                data: [{ index: 5, embedding: [1, 2] }],
+            }),
+        );
+
+    try {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            baseUrl: "http://localhost:11434/v1",
+            model: "test-model",
+        });
+
+        await assert.rejects(
+            async () => {
+                await provider.embed(["test 1"]);
+            },
+            { message: /out-of-range index/i },
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("F-013: OpenAICompatibleEmbeddingProvider: rejects fractional indices", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({
+                data: [{ index: 0.5, embedding: [1, 2] }],
+            }),
+        );
+
+    try {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            baseUrl: "http://localhost:11434/v1",
+            model: "test-model",
+        });
+
+        await assert.rejects(
+            async () => {
+                await provider.embed(["test 1"]);
+            },
+            { message: /index must be an integer/i },
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("F-013: OpenAICompatibleEmbeddingProvider: correctly maps reordered valid responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({
+                data: [
+                    { index: 2, embedding: [0.3, 0.3] },
+                    { index: 0, embedding: [0.1, 0.1] },
+                    { index: 1, embedding: [0.2, 0.2] },
+                ],
+            }),
+        );
+
+    try {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            baseUrl: "http://localhost:11434/v1",
+            model: "test-model",
+        });
+
+        const vectors = await provider.embed(["input 0", "input 1", "input 2"]);
+        assert.deepStrictEqual(vectors, [
+            [0.1, 0.1],
+            [0.2, 0.2],
+            [0.3, 0.3],
+        ]);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});

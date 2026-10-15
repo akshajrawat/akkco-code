@@ -13,6 +13,7 @@ export interface CommandContext {
     clearHistory: () => void;
     startTool: (toolName: string, input: unknown) => void;
     finishTool: (execution: ToolExecutionState) => void;
+    resetSession?: () => void;
 }
 
 export type CliCommand = {

@@ -116,6 +116,14 @@ export const compileContext = (
                         content: "Tool execution cancelled",
                         isError: true,
                     });
+                } else {
+                    // Reconcile requested or running incomplete execution from interrupted session
+                    items.push({
+                        type: "tool_result",
+                        callId: item.callId,
+                        content: "Tool execution was interrupted before completion",
+                        isError: true,
+                    });
                 }
                 break;
             }

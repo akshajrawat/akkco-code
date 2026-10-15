@@ -423,3 +423,50 @@ test("existing manual tool result/error rendering semantics remain intact", asyn
     assert.strictEqual(failedItem.execution.error, "Deliberate failure in tool");
     assert.strictEqual(typeof failedItem.execution.durationMs, "number");
 });
+
+test("F-001: /clear starts a fresh logical session preserving previous session records in SQLite", async () => {
+    const { SqliteConversationStore } = await import("@akkco/retrieval");
+    const { ConversationMemoryOrchestrator } = await import("@akkco/core");
+
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+    const persistence = new ConversationMemoryOrchestrator(store);
+
+    const provider = createMockProvider(["answer 1", "answer 2", "answer 3"]);
+    const toolRegistry = createToolRegistry();
+    const controller = createCliController({
+        provider,
+        toolRegistry,
+        persistence,
+    });
+
+    const session1Id = controller.getSession().id;
+
+    // Turn 1 and Turn 2 in session 1
+    await controller.submit("turn 1 question");
+    await controller.submit("turn 2 question");
+
+    const session1Items = await store.getTranscriptItems(session1Id);
+    assert.strictEqual(session1Items.length, 4);
+
+    // Clear session
+    await controller.submit("/clear");
+
+    const session2Id = controller.getSession().id;
+    assert.notStrictEqual(session1Id, session2Id);
+
+    // Turn 3 in new session 2
+    await controller.submit("turn 3 question in fresh session");
+
+    // Session 2 should have its own items starting from sequence 0
+    const session2Items = await store.getTranscriptItems(session2Id);
+    assert.strictEqual(session2Items.length, 2);
+    assert.strictEqual(session2Items[0].sequence, 0);
+    assert.strictEqual(session2Items[1].sequence, 1);
+
+    // Session 1 items in SQLite remain intact and untouched!
+    const session1ItemsAfter = await store.getTranscriptItems(session1Id);
+    assert.strictEqual(session1ItemsAfter.length, 4);
+
+    await store.close();
+});

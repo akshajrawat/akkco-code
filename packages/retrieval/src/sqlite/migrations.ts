@@ -94,23 +94,31 @@ export const loadMigrations = async (migrationsDir: string): Promise<MigrationFi
     // Sort ascending by version
     migrationCandidates.sort((a, b) => a.version - b.version);
 
-    // Validate sequential ordering starting at 1
-    if (migrationCandidates.length > 0) {
-        if (migrationCandidates[0].version !== 1) {
+    // Validate non-empty migrations and sequential ordering starting at 1
+    if (migrationCandidates.length === 0) {
+        throw new MigrationError("Migration directory is empty: no .sql migration files found.");
+    }
+
+    if (migrationCandidates[0].version !== 1) {
+        throw new MigrationError(
+            `Migrations must start at version 1, but found version ${migrationCandidates[0].version} in "${migrationCandidates[0].filename}".`,
+        );
+    }
+
+    for (let i = 1; i < migrationCandidates.length; i++) {
+        const prev = migrationCandidates[i - 1];
+        const curr = migrationCandidates[i];
+        if (curr.version !== prev.version + 1) {
             throw new MigrationError(
-                `Migrations must start at version 1, but found version ${migrationCandidates[0].version} in "${migrationCandidates[0].filename}".`,
+                `Migration version sequence gap detected: expected version ${prev.version + 1}, found version ${curr.version} in "${curr.filename}".`,
             );
         }
+    }
 
-        for (let i = 1; i < migrationCandidates.length; i++) {
-            const prev = migrationCandidates[i - 1];
-            const curr = migrationCandidates[i];
-            if (curr.version !== prev.version + 1) {
-                throw new MigrationError(
-                    `Migration version sequence gap detected: expected version ${prev.version + 1}, found version ${curr.version} in "${curr.filename}".`,
-                );
-            }
-        }
+    if (migrationCandidates[0].filename !== "0001_initial.sql") {
+        throw new MigrationError(
+            `Baseline migration "0001_initial.sql" is required as version 1, but found "${migrationCandidates[0].filename}".`,
+        );
     }
 
     // Load SQL content and calculate checksums asynchronously
@@ -139,6 +147,26 @@ interface AppliedMigrationRow {
 }
 
 const ensureSchemaMigrationsTable = (db: DatabaseSync): void => {
+    // Check if schema_migrations already exists
+    const schemaTableExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+        .get();
+
+    if (!schemaTableExists) {
+        // Detect unmanaged conflicting application tables
+        const conflicting = db
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name IN ('sessions', 'transcript_items', 'memory_documents')",
+            )
+            .all() as unknown as { name: string }[];
+
+        if (conflicting.length > 0) {
+            throw new MigrationError(
+                `Database contains unmanaged conflicting tables (${conflicting.map((c) => c.name).join(", ")}) not tracked by schema_migrations. A manual reset or migration is required.`,
+            );
+        }
+    }
+
     db.exec(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -237,7 +265,8 @@ export const executeWithRetry = async <T>(
         } catch (error: unknown) {
             if (isSqliteBusy(error) && attempt < maxRetries) {
                 attempt++;
-                const sleepMs = backoffMs * attempt;
+                const jitter = Math.random() * backoffMs;
+                const sleepMs = Math.round(backoffMs * Math.pow(1.5, attempt) + jitter);
                 await sleep(sleepMs);
                 continue;
             }
@@ -254,7 +283,7 @@ export const migrateDatabase = async (
     const availableMigrations = await loadMigrations(migrationsDir);
 
     db.exec("PRAGMA foreign_keys = ON;");
-    db.exec("PRAGMA busy_timeout = 10000;");
+    db.exec("PRAGMA busy_timeout = 3000;");
 
     // Initialize tracking table and validate existing migration state under write lock
     await executeWithRetry(() => {

@@ -129,39 +129,48 @@ export const parseOpenAIEventStream = async function* (
         }
     };
 
-    for await (const chunk of body) {
+    const throwIfAborted = () => {
         if (signal?.aborted) {
-            return;
+            if (typeof signal.throwIfAborted === "function") {
+                signal.throwIfAborted();
+            }
+            const err = new Error("This operation was aborted");
+            err.name = "AbortError";
+            throw err;
         }
+    };
+
+    for await (const chunk of body) {
+        throwIfAborted();
 
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
         for (const rawLine of lines) {
-            if (signal?.aborted) {
-                return;
-            }
+            throwIfAborted();
 
             for (const event of handleLine(rawLine)) {
                 yield event;
             }
 
             if (isDone) {
+                throwIfAborted();
                 return;
             }
         }
     }
 
-    if (!signal?.aborted) {
-        buffer += decoder.decode();
-        if (buffer.length > 0) {
-            for (const event of handleLine(buffer)) {
-                yield event;
-            }
-        }
-        if (!isDone) {
-            yield* flushToolCalls();
+    throwIfAborted();
+
+    buffer += decoder.decode();
+    if (buffer.length > 0) {
+        for (const event of handleLine(buffer)) {
+            yield event;
         }
     }
+    if (!isDone) {
+        yield* flushToolCalls();
+    }
+    throwIfAborted();
 };

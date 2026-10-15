@@ -67,3 +67,8 @@ test("cosineSimilarity: computes cosine similarity correctly", () => {
     assert.equal(cosineSimilarity([], []), 0);
     assert.equal(cosineSimilarity([1, 2], [1]), 0);
 });
+
+test("F-014: vectorSerializer: rejects values that overflow 32-bit float range like [1e100, 0]", () => {
+    assert.throws(() => serializeVector([1e100, 0]), { message: /overflows 32-bit float range/i });
+    assert.throws(() => serializeVector([-1e100, 0]), { message: /overflows 32-bit float range/i });
+});

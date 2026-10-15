@@ -191,3 +191,146 @@ test("SqliteConversationStore: memory document storage and vector search with id
 
     await store.close();
 });
+
+test("SqliteConversationStore: saveTranscriptItems is idempotent for identical records", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    const items = [
+        { sequence: 0, type: "user", payload: JSON.stringify({ content: "hello" }) },
+        { sequence: 1, type: "assistant", payload: JSON.stringify({ content: "world" }) },
+    ];
+
+    await store.saveTranscriptItems("sess-idempotent", items);
+    // Saving the identical items again must succeed without error or duplicate records
+    await store.saveTranscriptItems("sess-idempotent", items);
+
+    const saved = await store.getTranscriptItems("sess-idempotent");
+    assert.equal(saved.length, 2);
+    assert.equal(saved[0].sequence, 0);
+    assert.equal(saved[1].sequence, 1);
+
+    await store.close();
+});
+
+test("SqliteConversationStore: saveTranscriptItems rejects conflicting non-identical writes", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    const items = [
+        { sequence: 0, type: "user", payload: JSON.stringify({ content: "original text" }) },
+    ];
+    await store.saveTranscriptItems("sess-conflict", items);
+
+    const conflictingItems = [
+        { sequence: 0, type: "user", payload: JSON.stringify({ content: "conflicting text" }) },
+    ];
+
+    await assert.rejects(() => store.saveTranscriptItems("sess-conflict", conflictingItems), {
+        message: /Transcript conflict in session "sess-conflict" at sequence 0/,
+    });
+
+    // Verify original record is unchanged
+    const saved = await store.getTranscriptItems("sess-conflict");
+    assert.equal(saved.length, 1);
+    assert.equal(JSON.parse(saved[0].payload).content, "original text");
+
+    await store.close();
+});
+
+test("SqliteConversationStore: two sessions sharing one database are isolated", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    await store.saveTranscriptItems("sess-a", [
+        { sequence: 0, type: "user", payload: JSON.stringify({ content: "session a" }) },
+    ]);
+    await store.saveTranscriptItems("sess-b", [
+        { sequence: 0, type: "user", payload: JSON.stringify({ content: "session b" }) },
+    ]);
+
+    const itemsA = await store.getTranscriptItems("sess-a");
+    const itemsB = await store.getTranscriptItems("sess-b");
+
+    assert.equal(itemsA.length, 1);
+    assert.equal(itemsB.length, 1);
+    assert.equal(JSON.parse(itemsA[0].payload).content, "session a");
+    assert.equal(JSON.parse(itemsB[0].payload).content, "session b");
+
+    await store.close();
+});
+
+test("F-009: Concurrent initialize calls share single promise and do not leak connections", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+
+    // Call initialize 5 times concurrently
+    await Promise.all([
+        store.initialize(),
+        store.initialize(),
+        store.initialize(),
+        store.initialize(),
+        store.initialize(),
+    ]);
+
+    assert.equal(await store.getSchemaVersion(), 1);
+
+    // Repeat initialize call after already initialized is idempotent
+    await store.initialize();
+    assert.equal(await store.getSchemaVersion(), 1);
+
+    await store.close();
+});
+
+test("F-014: searchMemory isolates corrupt vector rows and successfully returns valid memories", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    // Insert 1 valid memory document
+    await store.saveMemoryDocument({
+        sessionId: "sess-corrupt-test",
+        startSequence: 0,
+        endSequence: 1,
+        content: "Valid memory document",
+        embedding: [1, 0, 0, 0],
+        embeddingProvider: "test-provider",
+        embeddingModel: "test-model",
+    });
+
+    // Directly corrupt a second row in SQLite with malformed binary blob (e.g. 5 bytes, not divisible by 4)
+    // @ts-expect-error accessing private db for test assertion
+    const db = store.getDb();
+    db.prepare(
+        `
+        INSERT INTO memory_documents (
+            id, session_id, start_sequence, end_sequence, content,
+            embedding, embedding_provider, embedding_model, embedding_dimensions, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    ).run(
+        "corrupt-row-id",
+        "sess-corrupt-test",
+        2,
+        3,
+        "Corrupted memory document",
+        new Uint8Array([1, 2, 3, 4, 5]), // 5 bytes: malformed!
+        "test-provider",
+        "test-model",
+        4,
+        new Date().toISOString(),
+    );
+
+    // Search memory: the corrupt row must NOT throw; the valid document must be returned!
+    const results = await store.searchMemory({
+        vector: [1, 0, 0, 0],
+        identity: {
+            provider: "test-provider",
+            model: "test-model",
+            dimensions: 4,
+        },
+    });
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].document.content, "Valid memory document");
+
+    await store.close();
+});

@@ -7,6 +7,8 @@ import type {
     ModelToolCallEvent,
     ModelToolResult,
 } from "@akkco/models";
+import { type ContextBudget, DEFAULT_CONTEXT_BUDGET } from "../context/budget.js";
+import { prepareBoundedModelRequest } from "../context/request-preparer.js";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
 import {
     AgentLoopError,
@@ -32,6 +34,7 @@ export const createAkkcoRuntime = (
     provider: ModelProvider,
     toolHost?: RuntimeToolHost,
     reliabilityOptions?: RuntimeReliabilityOptions,
+    budget?: ContextBudget,
 ) => {
     const { maxToolIterations, repeatedToolCallLimit, consecutiveToolErrorLimit } =
         validateReliabilityOptions(reliabilityOptions);
@@ -53,14 +56,20 @@ export const createAkkcoRuntime = (
                 while (true) {
                     throwIfAborted(request.signal);
 
+                    const boundedRequest = prepareBoundedModelRequest({
+                        request: {
+                            items: workingItems,
+                            tools: toolHost?.tools,
+                            signal: request.signal,
+                        },
+                        budget: budget ?? DEFAULT_CONTEXT_BUDGET,
+                    });
+
                     let turnAssistantText = "";
                     const toolCallEvents: ModelToolCallEvent[] = [];
 
-                    for await (const event of provider.stream({
-                        items: workingItems,
-                        tools: toolHost?.tools,
-                        signal: request.signal,
-                    })) {
+                    for await (const event of provider.stream(boundedRequest)) {
+                        throwIfAborted(request.signal);
                         if (event.type === "text") {
                             turnAssistantText += event.content;
                             yield {
@@ -71,6 +80,8 @@ export const createAkkcoRuntime = (
                             toolCallEvents.push(event);
                         }
                     }
+
+                    throwIfAborted(request.signal);
 
                     if (toolCallEvents.length === 0) {
                         return;

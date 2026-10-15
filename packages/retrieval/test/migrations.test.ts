@@ -476,7 +476,7 @@ test("Validation: detects sequence gaps, duplicate versions, and invalid filenam
         // 3. Gap in sequence
         const gapDir = join(tmpDir, "gap");
         await mkdir(gapDir);
-        await writeFile(join(gapDir, "0001_one.sql"), "SELECT 1;");
+        await writeFile(join(gapDir, "0001_initial.sql"), "SELECT 1;");
         await writeFile(join(gapDir, "0003_three.sql"), "SELECT 3;");
         await assert.rejects(
             async () => {
@@ -541,5 +541,126 @@ test("No event-loop-blocking retry loop during busy retry", async () => {
         );
     } finally {
         clearInterval(interval);
+    }
+});
+
+test("F-010: Migration runner rejects empty migration directories", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "akkco-mig-empty-"));
+    try {
+        const store = new SqliteConversationStore({
+            dbPath: ":memory:",
+            migrationsDir: tmpDir,
+        });
+
+        await assert.rejects(
+            async () => {
+                await store.initialize();
+            },
+            (err: unknown) => {
+                assert.ok(err instanceof MigrationError);
+                assert.ok(err.message.includes("Migration directory is empty"));
+                return true;
+            },
+        );
+    } finally {
+        await rm(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test("F-010: Migration runner rejects migrations without 0001_initial.sql", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "akkco-mig-no-initial-"));
+    try {
+        await writeFile(join(tmpDir, "0001_custom.sql"), "CREATE TABLE custom (id TEXT);", "utf8");
+        const store = new SqliteConversationStore({
+            dbPath: ":memory:",
+            migrationsDir: tmpDir,
+        });
+
+        await assert.rejects(
+            async () => {
+                await store.initialize();
+            },
+            (err: unknown) => {
+                assert.ok(err instanceof MigrationError);
+                assert.ok(err.message.includes("0001_initial.sql"));
+                return true;
+            },
+        );
+    } finally {
+        await rm(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test("F-010: Migration runner detects and rejects unmanaged conflicting tables", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "akkco-unmanaged-"));
+    const dbPath = join(tmpDir, "unmanaged.db");
+    try {
+        const db = new DatabaseSync(dbPath);
+        // Create an unmanaged sessions table without schema_migrations
+        db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, extra TEXT);");
+        db.close();
+
+        const store = new SqliteConversationStore({ dbPath });
+        await assert.rejects(
+            async () => {
+                await store.initialize();
+            },
+            (err: unknown) => {
+                assert.ok(err instanceof MigrationError);
+                assert.ok(err.message.includes("unmanaged conflicting tables"));
+                return true;
+            },
+        );
+    } finally {
+        await rm(tmpDir, { recursive: true, force: true });
+    }
+});
+
+test("F-022: Real process-level lock contention resolves successfully without deadlock", async () => {
+    const { spawn } = await import("node:child_process");
+    const tmpDir = await mkdtemp(join(tmpdir(), "akkco-contention-"));
+    const dbPath = join(tmpDir, "contention.db");
+
+    try {
+        // First initialize schema so tables exist
+        const store = new SqliteConversationStore({ dbPath });
+        await store.initialize();
+        await store.close();
+
+        // Spawn child process that acquires a write lock (BEGIN IMMEDIATE) and holds it for 200ms
+        const childCode = `
+            import { DatabaseSync } from "node:sqlite";
+            const db = new DatabaseSync(process.argv[1]);
+            db.exec("BEGIN IMMEDIATE;");
+            process.stdout.write("LOCKED\\n");
+            setTimeout(() => {
+                db.exec("COMMIT;");
+                db.close();
+                process.exit(0);
+            }, 200);
+        `;
+
+        const child = spawn(process.execPath, ["--input-type=module", "-e", childCode, dbPath], {
+            stdio: ["ignore", "pipe", "inherit"],
+        });
+
+        // Wait until child has acquired lock
+        await new Promise<void>((resolve) => {
+            child.stdout?.once("data", () => resolve());
+        });
+
+        // Now main process tries to execute a write operation under retry
+        const competingStore = new SqliteConversationStore({ dbPath });
+        await competingStore.initialize();
+        await competingStore.saveSession({ id: "concurrent-session" });
+
+        const session = await competingStore.getSession("concurrent-session");
+        assert.ok(session);
+        assert.equal(session.id, "concurrent-session");
+
+        await competingStore.close();
+        await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    } finally {
+        await rm(tmpDir, { recursive: true, force: true });
     }
 });

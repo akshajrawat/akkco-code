@@ -14,7 +14,11 @@ export const clearCommand: CliCommand = {
     description: "Clear the conversation session and display history",
     usage: "/clear",
     execute: (_args, context) => {
-        context.session.clear();
+        if (context.resetSession) {
+            context.resetSession();
+        } else {
+            context.session.clear();
+        }
         context.clearHistory();
         context.notice("Conversation cleared.");
     },
