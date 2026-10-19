@@ -12,6 +12,10 @@ import type {
     HistoryItem,
 } from "./types.js";
 
+/**
+ * Creates the central CLI controller coordinating Session turns, interactive commands,
+ * presentation state, and cancellation without depending on React or terminal I/O.
+ */
 export const createCliController = ({
     provider,
     toolRegistry,
@@ -20,6 +24,7 @@ export const createCliController = ({
     compiler,
     persistence,
     sessionId,
+    profile,
 }: CliControllerOptions) => {
     let state: CliViewState = {
         history: [],
@@ -108,6 +113,7 @@ export const createCliController = ({
                 id: id ?? crypto.randomUUID(),
                 compiler,
                 persistence,
+                profile,
             },
         );
 

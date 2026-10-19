@@ -15,6 +15,10 @@ const normalizeInputSchema = (schema: unknown): Record<string, unknown> => {
     return normalized;
 };
 
+/**
+ * Converts an internal ToolDefinition into a provider-neutral ModelTool,
+ * serializing its schema to standard JSON Schema for model consumption.
+ */
 export const toModelTool = (tool: AnyToolDefinition): ModelTool => ({
     name: tool.name,
     description: tool.description,

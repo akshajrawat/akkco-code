@@ -7,6 +7,10 @@ interface InProgressToolCall {
     emitted: boolean;
 }
 
+/**
+ * Parses Server-Sent Events (SSE) from an OpenAI-compatible stream into typed
+ * ModelEvents, accumulating streaming text and tool call deltas across chunks.
+ */
 export const parseOpenAIEventStream = async function* (
     body: AsyncIterable<Uint8Array>,
     signal?: AbortSignal,

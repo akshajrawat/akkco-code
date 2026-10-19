@@ -1623,18 +1623,19 @@ test("tiny agent policy survives compatibility transformation and maintains orde
     });
 
     assert.ok(capturedRequest);
-    // In compatibility mode, items[0] is the compatibility tool instructions system message,
-    // items[1] is the agent policy message (survived intact),
+    // In accordance with Milestone 1 logical order:
+    // items[0] is the trusted static system policy message,
+    // items[1] is the compatibility tool instructions system message,
     // items[2] is the user message
     assert.strictEqual(capturedRequest.items.length, 3);
-    const item0 = capturedRequest.items[0] as ModelMessage;
-    assert.strictEqual(item0.role, "system");
-    assert.match(item0.content, /<akkco_tool_call>/);
-    assert.deepStrictEqual(capturedRequest.items[1], {
+    assert.deepStrictEqual(capturedRequest.items[0], {
         type: "message",
         role: "system",
         content: agentPolicy,
     });
+    const item1 = capturedRequest.items[1] as ModelMessage;
+    assert.strictEqual(item1.role, "system");
+    assert.match(item1.content, /<akkco_tool_call>/);
     assert.deepStrictEqual(capturedRequest.items[2], {
         type: "message",
         role: "user",
@@ -1720,4 +1721,268 @@ test("fenced JSON never executes and remains ordinary text", async () => {
     assert.ok(events.every((e) => e.type === "text"));
     const fullText = events.map((e) => (e as any).content).join("");
     assert.strictEqual(fullText, fencedJson);
+});
+
+// Milestone 1 Integration Tests
+test("Milestone 1: Initial request passes final preflight", async () => {
+    let capturedRequest: ModelRequest | undefined;
+    const mock = new MockModelProvider((req) => {
+        capturedRequest = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "response" };
+            },
+        };
+    });
+
+    let preflightRan = false;
+    const compat = createTextToolCompatibilityProvider(mock, {
+        prepareRequest: (req) => {
+            preflightRan = true;
+            return { ...req, items: [...req.items] };
+        },
+    });
+
+    await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "Hello" }],
+        tools: [sampleTool],
+    });
+
+    assert.ok(preflightRan, "Final preflight must run on initial request");
+    assert.ok(capturedRequest);
+    assert.strictEqual(
+        capturedRequest.tools,
+        undefined,
+        "Native tools must be cleared in compatibility mode",
+    );
+});
+
+test("Milestone 1: No-tools requests do not bypass preflight", async () => {
+    let preflightRan = false;
+    let capturedRequest: ModelRequest | undefined;
+    const mock = new MockModelProvider((req) => {
+        capturedRequest = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "response" };
+            },
+        };
+    });
+
+    const compat = createTextToolCompatibilityProvider(mock, {
+        prepareRequest: (req) => {
+            preflightRan = true;
+            return req;
+        },
+    });
+
+    await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "Hello without tools" }],
+    });
+
+    assert.ok(preflightRan, "Preflight must run even when tools is empty or undefined");
+    assert.ok(capturedRequest);
+});
+
+test("Milestone 1: Protocol-repair requests pass final preflight", async () => {
+    let preflightCalls = 0;
+    let capturedRepairRequest: ModelRequest | undefined;
+    let callCount = 0;
+
+    const mock = new MockModelProvider((req) => {
+        callCount++;
+        if (callCount === 1) {
+            return {
+                async *[Symbol.asyncIterator]() {
+                    // Violate protocol
+                    yield { type: "text", content: "akkco_tool invalid" };
+                },
+            };
+        }
+        capturedRepairRequest = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield {
+                    type: "text",
+                    content:
+                        '<akkco_tool_call>\n{"name":"read_file","arguments":{"path":"a.ts"}}\n</akkco_tool_call>',
+                };
+            },
+        };
+    });
+
+    const compat = createTextToolCompatibilityProvider(mock, {
+        prepareRequest: (req) => {
+            preflightCalls++;
+            return req;
+        },
+    });
+
+    await collectEvents(compat, {
+        items: [{ type: "message", role: "user", content: "Run read_file" }],
+        tools: [sampleTool],
+    });
+
+    assert.strictEqual(
+        preflightCalls,
+        2,
+        "Preflight must run on both initial request and repair request",
+    );
+    assert.ok(capturedRepairRequest);
+    const lastItem = capturedRepairRequest.items[capturedRepairRequest.items.length - 1];
+    assert.strictEqual(lastItem.type, "message");
+    assert.ok(lastItem.content.includes("Akkco tool-call protocol"));
+});
+
+test("Milestone 1: Final compatibility instructions contain compact schemas and stable ordering", async () => {
+    let capturedRequest1: ModelRequest | undefined;
+    let capturedRequest2: ModelRequest | undefined;
+
+    const mock1 = new MockModelProvider((req) => {
+        capturedRequest1 = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "ok" };
+            },
+        };
+    });
+
+    const mock2 = new MockModelProvider((req) => {
+        capturedRequest2 = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "ok" };
+            },
+        };
+    });
+
+    const compat1 = createTextToolCompatibilityProvider(mock1);
+    const compat2 = createTextToolCompatibilityProvider(mock2);
+
+    // Pass tools in order [read_file, list_files]
+    await collectEvents(compat1, {
+        items: [{ type: "message", role: "user", content: "test" }],
+        tools: [sampleTool, sampleTool2],
+    });
+
+    // Pass tools in reverse order [list_files, read_file]
+    await collectEvents(compat2, {
+        items: [{ type: "message", role: "user", content: "test" }],
+        tools: [sampleTool2, sampleTool],
+    });
+
+    assert.ok(capturedRequest1);
+    assert.ok(capturedRequest2);
+
+    const instr1 =
+        capturedRequest1.items[0].type === "message" ? capturedRequest1.items[0].content : "";
+    const instr2 =
+        capturedRequest2.items[0].type === "message" ? capturedRequest2.items[0].content : "";
+
+    // Both should be deterministically ordered (list_files before read_file)
+    assert.strictEqual(instr1, instr2);
+    assert.ok(instr1.indexOf("Tool: list_files") < instr1.indexOf("Tool: read_file"));
+
+    // Compact schema serialization: should NOT contain pretty-printed 2-space newlines like '\n  "type"'
+    assert.ok(
+        !instr1.includes('{\n  "type"'),
+        "Schemas must be compact JSON without pretty-printing",
+    );
+    assert.ok(instr1.includes('{"type":"object"'), "Schema should be compact JSON");
+});
+
+test("Milestone 1: Prefix content stays byte-stable across turns when tools and policies are unchanged", async () => {
+    let turn1Request: ModelRequest | undefined;
+    let turn2Request: ModelRequest | undefined;
+
+    const mock = new MockModelProvider((req) => {
+        if (!turn1Request) {
+            turn1Request = req;
+        } else {
+            turn2Request = req;
+        }
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "ok" };
+            },
+        };
+    });
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    const policy = "You are a helpful assistant.";
+
+    // Turn 1
+    await collectEvents(compat, {
+        items: [
+            { type: "message", role: "system", content: policy },
+            { type: "message", role: "user", content: "First question" },
+        ],
+        tools: [sampleTool],
+    });
+
+    // Turn 2
+    await collectEvents(compat, {
+        items: [
+            { type: "message", role: "system", content: policy },
+            { type: "message", role: "user", content: "First question" },
+            { type: "message", role: "assistant", content: "First answer" },
+            { type: "message", role: "user", content: "Second question" },
+        ],
+        tools: [sampleTool],
+    });
+
+    assert.ok(turn1Request);
+    assert.ok(turn2Request);
+
+    // Prefix: items[0] is policy, items[1] is tool instruction
+    assert.deepStrictEqual(turn1Request.items[0], turn2Request.items[0]);
+    assert.deepStrictEqual(turn1Request.items[1], turn2Request.items[1]);
+});
+
+test("Milestone 1: Active user turn is not confused with tool-result envelopes", async () => {
+    let capturedRequest: ModelRequest | undefined;
+    const mock = new MockModelProvider((req) => {
+        capturedRequest = req;
+        return {
+            async *[Symbol.asyncIterator]() {
+                yield { type: "text", content: "ok" };
+            },
+        };
+    });
+
+    const compat = createTextToolCompatibilityProvider(mock);
+    await collectEvents(compat, {
+        items: [
+            { type: "message", role: "system", content: "System policy" },
+            { type: "message", role: "user", content: "Real active user question" },
+            {
+                type: "tool_call",
+                id: "c1",
+                name: "read_file",
+                arguments: { path: "foo.txt" },
+            },
+            {
+                type: "tool_result",
+                callId: "c1",
+                content: "file content",
+            },
+        ],
+        tools: [sampleTool],
+    });
+
+    assert.ok(capturedRequest);
+    // Transformed:
+    // [0]: System policy
+    // [1]: Tools instruction
+    // [2]: Real active user question
+    // [3]: Assistant tool call envelope
+    // [4]: User tool result envelope (with toolResultEnvelope metadata)
+    assert.strictEqual(capturedRequest.items.length, 5);
+    const userPrompt = capturedRequest.items[2] as ModelMessage;
+    assert.strictEqual(userPrompt.content, "Real active user question");
+    assert.strictEqual(userPrompt.toolResultEnvelope, undefined);
+
+    const toolResultMsg = capturedRequest.items[4] as ModelMessage;
+    assert.ok(toolResultMsg.toolResultEnvelope);
+    assert.strictEqual(toolResultMsg.toolResultEnvelope?.callId, "c1");
 });

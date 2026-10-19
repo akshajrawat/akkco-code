@@ -33,6 +33,10 @@ const formatToolActivity = (item: ToolExecutionTranscriptItem): string => {
     }
 };
 
+/**
+ * Derives a searchable memory document from a completed conversational turn,
+ * capturing user intent, concise tool summaries, and the final completed assistant answer.
+ */
 export const createMemoryDocumentFromTurn = (
     turnItems: readonly TranscriptItem[],
     startSequence: number,
@@ -82,6 +86,10 @@ export const createMemoryDocumentFromTurn = (
     };
 };
 
+/**
+ * Partitions a conversation transcript into completed turns and derives
+ * structured memory documents suitable for vector indexing.
+ */
 export const deriveMemoryDocumentsFromTranscript = (
     transcript: readonly TranscriptItem[],
 ): DerivedMemoryDocument[] => {

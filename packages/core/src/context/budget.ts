@@ -1,3 +1,5 @@
+import type { ModelProfile } from "@akkco/models";
+
 export interface ContextBudget {
     /**
      * Target upper bound on tokens for the model request input.
@@ -33,6 +35,10 @@ export const DEFAULT_CONTEXT_BUDGET: ContextBudget = {
     maximumRepositoryTokens: 2048,
 };
 
+/**
+ * Validates that context budget numbers are positive, non-negative, and properly ordered,
+ * ensuring preferred tokens exceed reserved overhead.
+ */
 export const validateContextBudget = (
     budget: ContextBudget,
     maxToolOutputTokens?: number,
@@ -124,4 +130,47 @@ export const validateContextBudget = (
             `Invalid context budget: preferredInputTokens (${budget.preferredInputTokens}) must be greater than reservedOverheadTokens (${budget.reservedOverheadTokens}) to leave space for mandatory input.`,
         );
     }
+};
+
+/**
+ * Calculate the authoritative maximum input tokens for a ModelProfile:
+ * maxInputTokens = contextWindowTokens - maxOutputTokens - safetyMarginTokens
+ */
+export const calculateMaxInputTokens = (profile: ModelProfile): number => {
+    const safetyMargin = profile.safetyMarginTokens ?? 0;
+    const maxInputTokens = profile.contextWindowTokens - profile.maxOutputTokens - safetyMargin;
+    return maxInputTokens;
+};
+
+/**
+ * Derive a ContextBudget from a ModelProfile for context compilation.
+ * Avoids double-counting safety margins by mapping the profile's derived input
+ * capacity into preferredInputTokens while maintaining proportional recent history
+ * and memory ceilings.
+ */
+export const deriveContextBudget = (
+    profile: ModelProfile,
+    overrides?: Partial<ContextBudget>,
+): ContextBudget => {
+    const maxInputTokens = calculateMaxInputTokens(profile);
+    const reservedOverheadTokens = overrides?.reservedOverheadTokens ?? 0;
+
+    const minimumRecentHistoryTokens =
+        overrides?.minimumRecentHistoryTokens ?? Math.floor(maxInputTokens * 0.25);
+
+    const maximumMemoryTokens = overrides?.maximumMemoryTokens ?? Math.floor(maxInputTokens * 0.3);
+
+    const maximumRepositoryTokens =
+        overrides?.maximumRepositoryTokens ?? Math.floor(maxInputTokens * 0.3);
+
+    const budget: ContextBudget = {
+        preferredInputTokens: overrides?.preferredInputTokens ?? maxInputTokens,
+        reservedOverheadTokens,
+        minimumRecentHistoryTokens,
+        maximumMemoryTokens,
+        maximumRepositoryTokens,
+    };
+
+    validateContextBudget(budget);
+    return budget;
 };

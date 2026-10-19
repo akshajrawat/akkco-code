@@ -3,10 +3,11 @@ import type { ModelItem, ModelTool, ModelToolCall, ModelToolResult } from "@akkc
 export const TOOL_CALL_OPEN_TAG = "<akkco_tool_call>";
 export const TOOL_CALL_CLOSE_TAG = "</akkco_tool_call>";
 
-export const formatToolsInstruction = (tools: ModelTool[]) => {
-    const toolList = tools
+export const formatToolsInstruction = (tools: readonly ModelTool[]) => {
+    const sorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+    const toolList = sorted
         .map((tool) => {
-            const schema = JSON.stringify(tool.inputSchema, null, 2);
+            const schema = JSON.stringify(tool.inputSchema ?? {});
             return `Tool: ${tool.name}\nDescription: ${tool.description}\nParameters JSON Schema:\n${schema}`;
         })
         .join("\n\n");
@@ -48,21 +49,47 @@ export const formatToolResultHistory = (result: ModelToolResult) => {
     return `<akkco_tool_result call_id="${result.callId}" status="${status}">\n${result.content}\n</akkco_tool_result>`;
 };
 
+/**
+ * Translates provider-neutral ModelItems into compatibility mode messages with
+ * XML envelopes for tool calls and tool results while anchoring system policies.
+ */
 export const transformRequestHistoryForCompatibility = (
-    items: ModelItem[],
-    tools?: ModelTool[],
+    items: readonly ModelItem[],
+    tools?: readonly ModelTool[],
 ): ModelItem[] => {
     const transformed: ModelItem[] = [];
 
+    // 1. Identify leading trusted static system policies
+    let policyPrefixEnd = 0;
+    while (policyPrefixEnd < items.length) {
+        const candidate = items[policyPrefixEnd];
+        if (
+            candidate.type === "message" &&
+            candidate.role === "system" &&
+            candidate.isPolicy !== false &&
+            candidate.provenance?.source !== "memory" &&
+            candidate.provenance?.source !== "repository"
+        ) {
+            transformed.push({ ...candidate });
+            policyPrefixEnd++;
+        } else {
+            break;
+        }
+    }
+
+    // 2. Stable compatibility tool instructions
     if (tools && tools.length > 0) {
         transformed.push({
             type: "message",
             role: "system",
             content: formatToolsInstruction(tools),
+            isToolInstruction: true,
         });
     }
 
-    for (const item of items) {
+    // 3. Remaining context items (untrusted context, previous history, active turn)
+    for (let i = policyPrefixEnd; i < items.length; i++) {
+        const item = items[i];
         switch (item.type) {
             case "message":
                 transformed.push({ ...item });
@@ -86,6 +113,11 @@ export const transformRequestHistoryForCompatibility = (
                     type: "message",
                     role: "user",
                     content: formatToolResultHistory(item),
+                    toolResultEnvelope: {
+                        callId: item.callId,
+                        status: item.isError ? "error" : "success",
+                        rawBody: item.content,
+                    },
                 });
                 break;
         }
@@ -109,6 +141,10 @@ export interface ParsedToolCall {
     preToolText?: string;
 }
 
+/**
+ * Parses and strictly validates a single terminal tool-call envelope from assistant text,
+ * rejecting post-envelope prose, code fences, and unadvertised tool invocations.
+ */
 export const parseCompatibilityToolCall = (
     text: string,
     advertisedTools: ModelTool[],
@@ -204,6 +240,10 @@ export type CompatibilityTurnClassification =
     | { type: "protocol_violation"; reason: string }
     | { type: "normal_prose" };
 
+/**
+ * Classifies model output as a valid tool call, a protocol violation requiring repair,
+ * or standard conversational prose.
+ */
 export const classifyCompatibilityTurn = (
     text: string,
     advertisedTools: ModelTool[],

@@ -1,5 +1,9 @@
 export const MAX_FLOAT32 = 3.4028234663852886e38;
 
+/**
+ * Serializes a float vector into a raw Float32Array byte buffer, verifying that
+ * all elements are finite and within 32-bit floating point range.
+ */
 export const serializeVector = (vector: readonly number[]): Uint8Array => {
     if (vector.length === 0) {
         throw new Error("Cannot serialize empty vector");
@@ -29,6 +33,10 @@ export const serializeVector = (vector: readonly number[]): Uint8Array => {
     return new Uint8Array(float32.buffer, float32.byteOffset, float32.byteLength);
 };
 
+/**
+ * Deserializes a raw byte buffer back into an array of floating point numbers,
+ * enforcing 4-byte alignment and finite value guarantees.
+ */
 export const deserializeVector = (blob: Uint8Array, expectedDimensions?: number): number[] => {
     if (blob.byteLength === 0) {
         throw new Error("Cannot deserialize empty vector blob");

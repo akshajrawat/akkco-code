@@ -48,6 +48,7 @@ export interface OpenAIRequestBody {
     messages: OpenAIMessage[];
     stream: true;
     tools?: OpenAITool[];
+    max_tokens?: number;
 }
 
 const serializeArguments = (args: unknown): string => JSON.stringify(args ?? {});
@@ -91,6 +92,10 @@ export const mapModelItemToOpenAIMessage = (item: ModelItem): OpenAIMessage => {
     }
 };
 
+/**
+ * Maps provider-neutral ModelItems into OpenAI chat completion messages, merging consecutive
+ * tool calls into assistant messages and remapping untrusted context to the user role.
+ */
 export const mapModelItemsToOpenAIMessages = (items: readonly ModelItem[]): OpenAIMessage[] => {
     const messages: OpenAIMessage[] = [];
     let i = 0;
@@ -190,8 +195,9 @@ export const mapModelItemsToOpenAIMessages = (items: readonly ModelItem[]): Open
     return messages;
 };
 
-export const mapModelToolsToOpenAITools = (tools: ModelTool[]): OpenAITool[] =>
-    tools.map((tool) => ({
+export const mapModelToolsToOpenAITools = (tools: readonly ModelTool[]): OpenAITool[] => {
+    const sorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+    return sorted.map((tool) => ({
         type: "function",
         function: {
             name: tool.name,
@@ -199,7 +205,12 @@ export const mapModelToolsToOpenAITools = (tools: ModelTool[]): OpenAITool[] =>
             parameters: tool.inputSchema,
         },
     }));
+};
 
+/**
+ * Maps an internal ModelRequest to an OpenAI-compatible wire payload, binding
+ * profile max output limits to max_tokens without leaking internal metadata.
+ */
 export const mapModelRequestToOpenAIPayload = (
     request: ModelRequest,
     model: string,
@@ -212,6 +223,21 @@ export const mapModelRequestToOpenAIPayload = (
 
     if (request.tools && request.tools.length > 0) {
         payload.tools = mapModelToolsToOpenAITools(request.tools);
+    }
+
+    const maxOutput = request.profile?.maxOutputTokens;
+    if (maxOutput !== undefined) {
+        if (
+            typeof maxOutput !== "number" ||
+            !Number.isFinite(maxOutput) ||
+            !Number.isInteger(maxOutput) ||
+            maxOutput <= 0
+        ) {
+            throw new RangeError(
+                `Invalid maxOutputTokens: must be a positive integer, received ${maxOutput}`,
+            );
+        }
+        payload.max_tokens = maxOutput;
     }
 
     return payload;

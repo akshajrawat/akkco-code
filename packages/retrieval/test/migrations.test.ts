@@ -12,18 +12,19 @@ import {
 } from "../src/index.js";
 import { executeWithRetry, getDefaultMigrationsDir } from "../src/sqlite/migrations.js";
 
-test("Fresh database receives v1 schema", async () => {
+test("Fresh database receives current schema", async () => {
     const store = new SqliteConversationStore({ dbPath: ":memory:" });
     await store.initialize();
 
     assert.equal(await store.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
-    assert.equal(await store.getSchemaVersion(), 1);
 
     // Verify schema_migrations table structure and metadata
     // @ts-expect-error accessing private db for test assertion
     const db = store.getDb();
     const migrations = db
-        .prepare("SELECT version, filename, checksum, applied_at FROM schema_migrations")
+        .prepare(
+            "SELECT version, filename, checksum, applied_at FROM schema_migrations ORDER BY version ASC",
+        )
         .all() as {
         version: number;
         filename: string;
@@ -31,12 +32,17 @@ test("Fresh database receives v1 schema", async () => {
         applied_at: string;
     }[];
 
-    assert.equal(migrations.length, 1);
+    assert.equal(migrations.length, CURRENT_SCHEMA_VERSION);
     assert.equal(migrations[0].version, 1);
     assert.equal(migrations[0].filename, "0001_initial.sql");
     assert.equal(typeof migrations[0].checksum, "string");
     assert.equal(migrations[0].checksum.length, 64);
     assert.ok(migrations[0].applied_at);
+
+    if (CURRENT_SCHEMA_VERSION >= 2) {
+        assert.equal(migrations[1].version, 2);
+        assert.equal(migrations[1].filename, "0002_context_summaries.sql");
+    }
 
     // Verify business tables exist
     const tables = (
@@ -48,6 +54,7 @@ test("Fresh database receives v1 schema", async () => {
     assert.ok(tables.includes("sessions"));
     assert.ok(tables.includes("transcript_items"));
     assert.ok(tables.includes("memory_documents"));
+    assert.ok(tables.includes("context_summaries"));
 
     // Verify indexes exist
     const indexes = (
@@ -59,6 +66,7 @@ test("Fresh database receives v1 schema", async () => {
     assert.ok(indexes.includes("idx_transcript_items_session_seq"));
     assert.ok(indexes.includes("idx_memory_documents_session"));
     assert.ok(indexes.includes("idx_memory_documents_identity"));
+    assert.ok(indexes.includes("idx_context_summaries_session_range"));
 
     await store.close();
 });
@@ -120,7 +128,7 @@ test("Repeated initialization is idempotent", async () => {
     try {
         const store1 = new SqliteConversationStore({ dbPath });
         await store1.initialize();
-        assert.equal(await store1.getSchemaVersion(), 1);
+        assert.equal(await store1.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
         await store1.close();
 
         // Re-open same db
@@ -128,12 +136,12 @@ test("Repeated initialization is idempotent", async () => {
         await store2.initialize();
         // Call initialize twice on same instance
         await store2.initialize();
-        assert.equal(await store2.getSchemaVersion(), 1);
+        assert.equal(await store2.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
 
         // Explicitly call migrateDatabase again
         // @ts-expect-error accessing private db for test assertion
         const res = await migrateDatabase(store2.getDb());
-        assert.equal(res.currentVersion, 1);
+        assert.equal(res.currentVersion, CURRENT_SCHEMA_VERSION);
         assert.equal(res.appliedVersions.length, 0);
 
         await store2.close();
@@ -414,16 +422,16 @@ test("Concurrent startup does not apply the same migration twice", async () => {
         await Promise.all(stores.map((s) => s.initialize()));
 
         for (const s of stores) {
-            assert.equal(await s.getSchemaVersion(), 1);
+            assert.equal(await s.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
         }
 
-        // Verify schema_migrations has exactly 1 row
+        // Verify schema_migrations has exactly CURRENT_SCHEMA_VERSION rows
         // @ts-expect-error accessing private db for test assertion
         const db = stores[0].getDb();
         const count = db.prepare("SELECT COUNT(*) as cnt FROM schema_migrations").get() as {
             cnt: number;
         };
-        assert.equal(count.cnt, 1);
+        assert.equal(count.cnt, CURRENT_SCHEMA_VERSION);
 
         for (const s of stores) {
             await s.close();

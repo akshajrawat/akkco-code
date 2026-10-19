@@ -15,6 +15,10 @@ export const isAbsolutePath = (targetPath: string): boolean => {
     );
 };
 
+/**
+ * Resolves a repository-relative path against the root, verifying that neither
+ * the lexical path nor any filesystem symlink escapes the repository boundary.
+ */
 export const resolveRepositoryPath = async (repositoryRoot: string, userPath: string) => {
     if (isAbsolutePath(userPath)) {
         throw new Error(

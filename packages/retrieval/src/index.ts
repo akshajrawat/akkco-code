@@ -15,6 +15,8 @@ export type {
     MemoryCandidate,
     MemoryDocumentInput,
     MemorySearchQuery,
+    StoredContextSummary,
+    ContextSummaryInput,
     StoredMemoryDocument,
     StoredSession,
     StoredTranscriptRecord,

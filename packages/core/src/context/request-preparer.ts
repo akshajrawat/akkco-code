@@ -1,7 +1,18 @@
-import type { ModelItem, ModelRequest, ModelTool, ModelToolResult } from "@akkco/models";
+import type {
+    ModelItem,
+    ModelMessage,
+    ModelProfile,
+    ModelRequest,
+    ModelTool,
+    ModelToolResult,
+} from "@akkco/models";
 import { type ContextBudget, DEFAULT_CONTEXT_BUDGET, validateContextBudget } from "./budget.js";
 import { estimateModelItemTokens, estimateTokens } from "./token-estimator.js";
 
+/**
+ * Thrown when mandatory request elements or active tool results exceed the
+ * available context budget, failing closed before calling the model provider.
+ */
 export class ContextBudgetOverflowError extends Error {
     constructor(message: string) {
         super(message);
@@ -12,9 +23,14 @@ export class ContextBudgetOverflowError extends Error {
 export interface PrepareBoundedModelRequestOptions {
     readonly request: ModelRequest;
     readonly budget?: ContextBudget;
+    readonly profile?: ModelProfile;
     readonly maxToolOutputTokens?: number;
 }
 
+/**
+ * Determines whether a system message is a mandatory policy item that must be preserved,
+ * excluding optional instructions or untrusted context with non-policy provenance.
+ */
 export const isMandatoryPolicyItem = (item: ModelItem): boolean => {
     if (item.type !== "message" || item.role !== "system") {
         return false;
@@ -29,7 +45,55 @@ export const isMandatoryPolicyItem = (item: ModelItem): boolean => {
     return true;
 };
 
-export const estimateToolsTokens = (tools?: readonly ModelTool[]): number => {
+/**
+ * Identifies privileged leading system items (policy and tool instructions)
+ * that form the immutable prefix of a request and cannot be evicted.
+ */
+export const isPrivilegedPrefixItem = (item: ModelItem): boolean => {
+    if (item.type !== "message" || item.role !== "system") {
+        return false;
+    }
+    if (item.isToolInstruction === true) {
+        return true;
+    }
+    return isMandatoryPolicyItem(item);
+};
+
+/**
+ * Identifies genuine user prompt messages, distinguishing them from compatibility tool
+ * result envelopes, repair instructions, and retrieved context documents that use the user role.
+ */
+export const isRealUserPromptItem = (item: ModelItem): boolean => {
+    if (item.type !== "message" || item.role !== "user") {
+        return false;
+    }
+    if (item.toolResultEnvelope !== undefined) {
+        return false;
+    }
+    if (item.isRepairInstruction === true) {
+        return false;
+    }
+    if (item.provenance?.source === "memory" || item.provenance?.source === "repository") {
+        return false;
+    }
+    return true;
+};
+
+/**
+ * Determines whether an item is a tool result, recognizing both native tool result items
+ * and compatibility mode message envelopes.
+ */
+export const isToolResultItem = (item: ModelItem): boolean => {
+    if (item.type === "tool_result") {
+        return true;
+    }
+    if (item.type === "message" && item.toolResultEnvelope !== undefined) {
+        return true;
+    }
+    return false;
+};
+
+export const estimateToolsTokens = (tools?: readonly ModelTool[], charsPerToken = 4): number => {
     if (!tools || tools.length === 0) {
         return 0;
     }
@@ -37,9 +101,9 @@ export const estimateToolsTokens = (tools?: readonly ModelTool[]): number => {
         const schemaStr = JSON.stringify(t.inputSchema ?? {});
         return (
             sum +
-            estimateTokens(t.name) +
-            estimateTokens(t.description) +
-            estimateTokens(schemaStr) +
+            estimateTokens(t.name, charsPerToken) +
+            estimateTokens(t.description, charsPerToken) +
+            estimateTokens(schemaStr, charsPerToken) +
             8
         );
     }, 0);
@@ -49,17 +113,26 @@ export const estimateRequestTokens = (
     items: readonly ModelItem[],
     tools?: readonly ModelTool[],
     reservedOverheadTokens = 0,
+    charsPerToken = 4,
 ): number => {
-    const itemsTokens = items.reduce((sum, it) => sum + estimateModelItemTokens(it), 0);
-    const toolsTokens = estimateToolsTokens(tools);
+    const itemsTokens = items.reduce(
+        (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
+        0,
+    );
+    const toolsTokens = estimateToolsTokens(tools, charsPerToken);
     return itemsTokens + toolsTokens + reservedOverheadTokens;
 };
 
+/**
+ * Truncates a native tool result payload to fit within a target token budget while reserving
+ * space for framing overhead and appending an explicit truncation notice.
+ */
 export const truncateToolResult = (
     item: ModelToolResult,
     targetItemTokens: number,
+    charsPerToken = 4,
 ): ModelToolResult => {
-    const rawTokens = estimateModelItemTokens(item);
+    const rawTokens = estimateModelItemTokens(item, charsPerToken);
     if (rawTokens <= targetItemTokens) {
         return item;
     }
@@ -72,7 +145,7 @@ export const truncateToolResult = (
 
     // Framing overhead for tool_result is 4 tokens (role/formatting)
     const maxContentTokens = targetItemTokens - 4;
-    const maxChars = maxContentTokens * 4;
+    const maxChars = maxContentTokens * charsPerToken;
 
     const fullNotice = `\n\n[Output truncated: exceeded token budget limit of ${targetItemTokens} tokens. Original length: ${item.content.length} characters. Canonical transcript retains full tool output.]`;
     const shortNotice = `\n\n[Output truncated: ${item.content.length} chars.]`;
@@ -93,7 +166,10 @@ export const truncateToolResult = (
     const retainedChars = Math.max(0, maxChars - notice.length);
     let finalContent = item.content.slice(0, retainedChars) + notice;
 
-    while (estimateTokens(finalContent) + 4 > targetItemTokens && retainedChars > 0) {
+    while (
+        estimateTokens(finalContent, charsPerToken) + 4 > targetItemTokens &&
+        retainedChars > 0
+    ) {
         finalContent = finalContent.slice(0, finalContent.length - notice.length - 1) + notice;
     }
 
@@ -105,6 +181,89 @@ export const truncateToolResult = (
     };
 };
 
+/**
+ * Truncates a compatibility tool result message, preserving XML boundary tags and
+ * envelope metadata while bounding the inner payload to fit within the target token budget.
+ */
+export const truncateCompatibilityToolResult = (
+    item: ModelMessage,
+    targetItemTokens: number,
+    charsPerToken = 4,
+): ModelMessage => {
+    const rawTokens = estimateModelItemTokens(item, charsPerToken);
+    if (rawTokens <= targetItemTokens) {
+        return item;
+    }
+
+    const meta = item.toolResultEnvelope!;
+    const header = `<akkco_tool_result call_id="${meta.callId}" status="${meta.status}">\n`;
+    const footer = `\n</akkco_tool_result>`;
+    const envelopeFramingTokens = estimateTokens(header + footer, charsPerToken) + 4;
+
+    if (targetItemTokens < envelopeFramingTokens + 8) {
+        throw new ContextBudgetOverflowError(
+            `Cannot truncate tool result envelope: target budget of ${targetItemTokens} tokens is too small for envelope tags and truncation indicator.`,
+        );
+    }
+
+    const maxBodyTokens = targetItemTokens - envelopeFramingTokens;
+    const maxChars = maxBodyTokens * charsPerToken;
+    const originalBody = meta.rawBody ?? item.content;
+
+    const fullNotice = `\n\n[Output truncated: exceeded token budget limit of ${targetItemTokens} tokens. Original length: ${originalBody.length} characters. Canonical transcript retains full tool output.]`;
+    const shortNotice = `\n\n[Output truncated: ${originalBody.length} chars.]`;
+    const compactNotice = `\n\n[Output truncated]`;
+    const minNotice = ` [Truncated]`;
+
+    let notice = "";
+    if (maxChars >= fullNotice.length) {
+        notice = fullNotice;
+    } else if (maxChars >= shortNotice.length) {
+        notice = shortNotice;
+    } else if (maxChars >= compactNotice.length) {
+        notice = compactNotice;
+    } else {
+        notice = minNotice;
+    }
+
+    const retainedChars = Math.max(0, maxChars - notice.length);
+    let finalBody = originalBody.slice(0, retainedChars) + notice;
+
+    while (
+        estimateTokens(header + finalBody + footer, charsPerToken) + 4 > targetItemTokens &&
+        retainedChars > 0
+    ) {
+        finalBody = finalBody.slice(0, finalBody.length - notice.length - 1) + notice;
+    }
+
+    return {
+        ...item,
+        content: `${header}${finalBody}${footer}`,
+        toolResultEnvelope: {
+            ...meta,
+            rawBody: finalBody,
+        },
+    };
+};
+
+export const truncateAnyToolResult = (
+    item: ModelItem,
+    targetBudget: number,
+    charsPerToken = 4,
+): ModelItem => {
+    if (item.type === "tool_result") {
+        return truncateToolResult(item, targetBudget, charsPerToken);
+    }
+    if (item.type === "message" && item.toolResultEnvelope !== undefined) {
+        return truncateCompatibilityToolResult(item, targetBudget, charsPerToken);
+    }
+    return item;
+};
+
+/**
+ * Distributes available token capacity across tool results proportionally with a safety floor,
+ * without complex multi-iteration fair-share algorithms.
+ */
 export const allocateToolResultBudgets = (
     desiredBudgets: readonly number[],
     totalAvailable: number,
@@ -121,40 +280,35 @@ export const allocateToolResultBudgets = (
     }
 
     const allocations = new Array<number>(n).fill(minPerItem);
-    let remaining = totalAvailable - n * minPerItem;
-    if (remaining <= 0) {
-        if (totalAvailable < n * minPerItem) {
-            let left = totalAvailable;
-            for (let i = 0; i < n; i++) {
-                const share = Math.floor(totalAvailable / n);
-                allocations[i] = Math.min(desiredBudgets[i], share);
-                left -= allocations[i];
-            }
-            if (left > 0) {
-                allocations[0] += left;
-            }
-        }
+    const availableAfterFloor = Math.max(0, totalAvailable - n * minPerItem);
+
+    if (availableAfterFloor === 0) {
         return allocations;
     }
 
-    const active = new Set<number>();
-    for (let i = 0; i < n; i++) {
-        if (desiredBudgets[i] > minPerItem) {
-            active.add(i);
-        }
+    const excessDesired = desiredBudgets.map((b) => Math.max(0, b - minPerItem));
+    const totalExcessDesired = excessDesired.reduce((sum, b) => sum + b, 0);
+
+    if (totalExcessDesired === 0) {
+        return allocations;
     }
 
-    while (active.size > 0 && remaining > 0) {
-        const step = Math.max(1, Math.floor(remaining / active.size));
-        for (const idx of Array.from(active)) {
-            const need = desiredBudgets[idx] - allocations[idx];
-            const add = Math.min(need, step, remaining);
-            allocations[idx] += add;
-            remaining -= add;
-            if (allocations[idx] >= desiredBudgets[idx]) {
-                active.delete(idx);
-            }
-            if (remaining <= 0) break;
+    let remainingToDistribute = availableAfterFloor;
+    for (let i = 0; i < n; i++) {
+        const share = Math.min(
+            excessDesired[i],
+            Math.floor((availableAfterFloor * excessDesired[i]) / totalExcessDesired),
+        );
+        allocations[i] += share;
+        remainingToDistribute -= share;
+    }
+
+    for (let i = 0; i < n && remainingToDistribute > 0; i++) {
+        const unmet = desiredBudgets[i] - allocations[i];
+        if (unmet > 0) {
+            const add = Math.min(unmet, remainingToDistribute);
+            allocations[i] += add;
+            remainingToDistribute -= add;
         }
     }
 
@@ -166,45 +320,48 @@ export interface HistoricalGroup {
     estimatedTokens: number;
 }
 
+/**
+ * Groups historical items into atomic conversational units (turns, memory excerpts, or system messages)
+ * so prior context can be packed or evicted without orphaning tool calls from their results.
+ */
 export const groupHistoricalItems = (
     items: readonly ModelItem[],
-    maxToolOutputTokens?: number,
+    charsPerToken = 4,
 ): HistoricalGroup[] => {
     const groups: HistoricalGroup[] = [];
     let currentGroup: ModelItem[] = [];
 
     const flushGroup = () => {
         if (currentGroup.length === 0) return;
-        const tokens = currentGroup.reduce((sum, it) => sum + estimateModelItemTokens(it), 0);
+        const tokens = currentGroup.reduce(
+            (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
+            0,
+        );
         groups.push({ items: currentGroup, estimatedTokens: tokens });
         currentGroup = [];
     };
 
     for (let i = 0; i < items.length; i++) {
-        let item = items[i];
-
-        if (item.type === "tool_result" && maxToolOutputTokens !== undefined) {
-            item = truncateToolResult(item, maxToolOutputTokens);
-        }
+        const item = items[i];
 
         if (
             item.type === "message" &&
             (item.provenance?.source === "memory" || item.provenance?.source === "repository")
         ) {
             flushGroup();
-            const tokens = estimateModelItemTokens(item);
+            const tokens = estimateModelItemTokens(item, charsPerToken);
             groups.push({ items: [item], estimatedTokens: tokens });
             continue;
         }
 
         if (item.type === "message" && item.role === "system") {
             flushGroup();
-            const tokens = estimateModelItemTokens(item);
+            const tokens = estimateModelItemTokens(item, charsPerToken);
             groups.push({ items: [item], estimatedTokens: tokens });
             continue;
         }
 
-        if (item.type === "message" && item.role === "user") {
+        if (isRealUserPromptItem(item)) {
             flushGroup();
             currentGroup.push(item);
             continue;
@@ -217,24 +374,61 @@ export const groupHistoricalItems = (
     return groups;
 };
 
+/**
+ * Authoritative preflight preparation stage that validates and projects an outbound model request
+ * into configured token limits without mutating the canonical session transcript.
+ */
 export const prepareBoundedModelRequest = (
     options: PrepareBoundedModelRequestOptions,
 ): ModelRequest => {
     const { request } = options;
-    const budget = options.budget !== undefined ? options.budget : DEFAULT_CONTEXT_BUDGET;
-    const maxToolOutputTokens = options.maxToolOutputTokens ?? 1500;
+    const effectiveProfile = options.profile ?? request.profile;
+    const charsPerToken = effectiveProfile?.charsPerToken ?? 4;
+    const maxToolOutputTokens = options.maxToolOutputTokens;
 
-    // 1. Mandatory budget validation (must not be bypassed even on empty requests)
-    validateContextBudget(budget, maxToolOutputTokens);
+    let authoritativeBudget: number;
+    let reservedOverhead: number;
 
-    // 2. Compute tools overhead and available capacity
-    const toolsOverhead = estimateToolsTokens(request.tools);
-    const effectiveBudget =
-        budget.preferredInputTokens - budget.reservedOverheadTokens - toolsOverhead;
+    if (effectiveProfile) {
+        const margin = effectiveProfile.safetyMarginTokens ?? 0;
+        const profileInputCap =
+            effectiveProfile.contextWindowTokens - effectiveProfile.maxOutputTokens - margin;
+
+        if (options.budget !== undefined) {
+            validateContextBudget(options.budget, maxToolOutputTokens);
+            authoritativeBudget = Math.min(profileInputCap, options.budget.preferredInputTokens);
+        } else {
+            authoritativeBudget = profileInputCap;
+        }
+        reservedOverhead = 0;
+    } else {
+        const budget = options.budget !== undefined ? options.budget : DEFAULT_CONTEXT_BUDGET;
+        validateContextBudget(budget, maxToolOutputTokens);
+        authoritativeBudget = budget.preferredInputTokens;
+        reservedOverhead = budget.reservedOverheadTokens;
+    }
+
+    const toolsOverhead = estimateToolsTokens(request.tools, charsPerToken);
+    const effectiveBudget = authoritativeBudget - reservedOverhead - toolsOverhead;
+
+    const formatOverflow = (reason: string, requiredTokens: number, capacity: number): string => {
+        if (effectiveProfile) {
+            const margin = effectiveProfile.safetyMarginTokens ?? 0;
+            return (
+                `${reason}: Required estimated tokens (${requiredTokens}) exceed available input capacity (${capacity} tokens). ` +
+                `[Profile: contextWindow=${effectiveProfile.contextWindowTokens}, maxOutput=${effectiveProfile.maxOutputTokens}, safetyMargin=${margin}]`
+            );
+        }
+        return `${reason}: Required estimated tokens (${requiredTokens}) exceed available budget (${capacity} tokens).`;
+    };
 
     if (effectiveBudget < 0) {
         throw new ContextBudgetOverflowError(
-            `Reserved overhead and tool definitions (${budget.reservedOverheadTokens + toolsOverhead} tokens) exceed total budget (${budget.preferredInputTokens} tokens).`,
+            formatOverflow(
+                "Reserved overhead and tool definitions exceed total budget",
+                reservedOverhead + toolsOverhead,
+                authoritativeBudget,
+            ),
         );
     }
 
@@ -244,15 +438,16 @@ export const prepareBoundedModelRequest = (
             items: [],
             tools: request.tools,
             signal: request.signal,
+            profile: effectiveProfile,
         };
     }
 
-    // 3. Identify trusted mandatory system policies at start of request
+    // Identify trusted privileged system prefix at start of request
     const mandatorySystemItems: ModelItem[] = [];
     let firstNonPolicyIndex = 0;
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
-        if (isMandatoryPolicyItem(item)) {
+        if (isPrivilegedPrefixItem(item)) {
             mandatorySystemItems.push(item);
             firstNonPolicyIndex = i + 1;
         } else {
@@ -260,43 +455,12 @@ export const prepareBoundedModelRequest = (
         }
     }
 
-    // 4. Locate the active turn
+    // Locate active turn: search backwards for real user prompt
     let activeTurnStartIndex = -1;
-    const lastItem = items[items.length - 1];
-    const isRepairTurn = Boolean(
-        lastItem &&
-        lastItem.type === "message" &&
-        lastItem.role === "user" &&
-        lastItem.content.includes("Akkco tool-call protocol"),
-    );
-
-    if (isRepairTurn) {
-        // In a protocol repair turn, the last item is the repair instruction.
-        // The active turn started at the user prompt before the assistant's failed attempt.
-        for (let i = items.length - 2; i >= firstNonPolicyIndex; i--) {
-            const it = items[i];
-            if (
-                it.type === "message" &&
-                it.role === "user" &&
-                it.provenance?.source !== "memory" &&
-                it.provenance?.source !== "repository"
-            ) {
-                activeTurnStartIndex = i;
-                break;
-            }
-        }
-    } else {
-        for (let i = items.length - 1; i >= firstNonPolicyIndex; i--) {
-            const it = items[i];
-            if (
-                it.type === "message" &&
-                it.role === "user" &&
-                it.provenance?.source !== "memory" &&
-                it.provenance?.source !== "repository"
-            ) {
-                activeTurnStartIndex = i;
-                break;
-            }
+    for (let i = items.length - 1; i >= firstNonPolicyIndex; i--) {
+        if (isRealUserPromptItem(items[i])) {
+            activeTurnStartIndex = i;
+            break;
         }
     }
 
@@ -305,39 +469,46 @@ export const prepareBoundedModelRequest = (
     }
 
     const mandatorySystemTokens = mandatorySystemItems.reduce(
-        (sum, it) => sum + estimateModelItemTokens(it),
+        (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
         0,
     );
 
-    // 5. Active turn items
+    // Active turn items
     const activeTurnItems = items.slice(activeTurnStartIndex);
 
-    // If active turn starts with user message, it is mandatory user input
     const activePromptItem =
-        activeTurnItems.length > 0 &&
-        activeTurnItems[0].type === "message" &&
-        activeTurnItems[0].role === "user"
+        activeTurnItems.length > 0 && isRealUserPromptItem(activeTurnItems[0])
             ? activeTurnItems[0]
             : null;
 
-    const mandatoryPromptTokens = activePromptItem ? estimateModelItemTokens(activePromptItem) : 0;
+    const mandatoryPromptTokens = activePromptItem
+        ? estimateModelItemTokens(activePromptItem, charsPerToken)
+        : 0;
     const totalMandatoryTokens = mandatorySystemTokens + mandatoryPromptTokens;
 
     if (totalMandatoryTokens > effectiveBudget) {
         throw new ContextBudgetOverflowError(
-            `Mandatory request input (${totalMandatoryTokens} estimated tokens) exceeds available budget (${effectiveBudget} tokens).`,
+            formatOverflow(
+                "Mandatory request input exceeds available budget",
+                totalMandatoryTokens,
+                effectiveBudget,
+            ),
         );
     }
 
-    // Non-tool-result active turn items (user prompt, assistant prose, tool calls, repair instructions)
+    // Non-tool-result active turn items
     const activeNonToolResultTokens = activeTurnItems
-        .filter((it) => it.type !== "tool_result")
-        .reduce((sum, it) => sum + estimateModelItemTokens(it), 0);
+        .filter((it) => !isToolResultItem(it))
+        .reduce((sum, it) => sum + estimateModelItemTokens(it, charsPerToken), 0);
 
     const baseRequiredTokens = mandatorySystemTokens + activeNonToolResultTokens;
     if (baseRequiredTokens > effectiveBudget) {
         throw new ContextBudgetOverflowError(
-            `Mandatory policy and current-turn activity (${baseRequiredTokens} estimated tokens) exceed available budget (${effectiveBudget} tokens).`,
+            formatOverflow(
+                "Mandatory policy and current-turn activity exceed available budget",
+                baseRequiredTokens,
+                effectiveBudget,
+            ),
         );
     }
 
@@ -346,7 +517,7 @@ export const prepareBoundedModelRequest = (
     // Identify tool results in active turn
     const activeToolResultIndices: number[] = [];
     for (let i = 0; i < activeTurnItems.length; i++) {
-        if (activeTurnItems[i].type === "tool_result") {
+        if (isToolResultItem(activeTurnItems[i])) {
             activeToolResultIndices.push(i);
         }
     }
@@ -357,13 +528,18 @@ export const prepareBoundedModelRequest = (
         const minTokensRequired = activeToolResultIndices.length * 8;
         if (availableForToolResults < minTokensRequired) {
             throw new ContextBudgetOverflowError(
-                `Tool results in active turn cannot fit within available budget (${availableForToolResults} tokens available for ${activeToolResultIndices.length} results).`,
+                formatOverflow(
+                    `Tool results in active turn cannot fit within available budget (${availableForToolResults} tokens available for ${activeToolResultIndices.length} results)`,
+                    minTokensRequired,
+                    availableForToolResults,
+                ),
             );
         }
 
         const desiredBudgets = activeToolResultIndices.map((idx) => {
-            const tr = activeTurnItems[idx] as ModelToolResult;
-            return Math.min(estimateModelItemTokens(tr), maxToolOutputTokens);
+            const tr = activeTurnItems[idx];
+            const est = estimateModelItemTokens(tr, charsPerToken);
+            return maxToolOutputTokens !== undefined ? Math.min(est, maxToolOutputTokens) : est;
         });
 
         const allocatedBudgets = allocateToolResultBudgets(
@@ -374,14 +550,18 @@ export const prepareBoundedModelRequest = (
 
         for (let i = 0; i < activeToolResultIndices.length; i++) {
             const idx = activeToolResultIndices[i];
-            const originalResult = activeTurnItems[idx] as ModelToolResult;
+            const originalResult = activeTurnItems[idx];
             const targetBudget = allocatedBudgets[i];
-            boundedActiveTurnItems[idx] = truncateToolResult(originalResult, targetBudget);
+            boundedActiveTurnItems[idx] = truncateAnyToolResult(
+                originalResult,
+                targetBudget,
+                charsPerToken,
+            );
         }
     }
 
     const actualActiveTurnTokens = boundedActiveTurnItems.reduce(
-        (sum, it) => sum + estimateModelItemTokens(it),
+        (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
         0,
     );
 
@@ -390,9 +570,9 @@ export const prepareBoundedModelRequest = (
         effectiveBudget - mandatorySystemTokens - actualActiveTurnTokens,
     );
 
-    // 6. Optional historical items (between system policies and active turn)
+    // Optional historical items
     const historicalSlice = items.slice(firstNonPolicyIndex, activeTurnStartIndex);
-    const historicalGroups = groupHistoricalItems(historicalSlice, maxToolOutputTokens);
+    const historicalGroups = groupHistoricalItems(historicalSlice, charsPerToken);
     const selectedHistory: ModelItem[] = [];
 
     // Walk backwards through complete historical groups, packing units that fit
@@ -402,28 +582,30 @@ export const prepareBoundedModelRequest = (
             selectedHistory.unshift(...group.items);
             remainingForHistory -= group.estimatedTokens;
         } else {
-            // Can no longer fit earlier atomic historical turns
             break;
         }
     }
 
-    // 7. Assemble final prepared request items
     const finalItems: ModelItem[] = [
         ...mandatorySystemItems,
         ...selectedHistory,
         ...boundedActiveTurnItems,
     ];
 
-    // 8. Final verification: calculate complete estimated request cost including overhead
     const totalRequestTokens = estimateRequestTokens(
         finalItems,
         request.tools,
-        budget.reservedOverheadTokens,
+        reservedOverhead,
+        charsPerToken,
     );
 
-    if (totalRequestTokens > budget.preferredInputTokens) {
+    if (totalRequestTokens > authoritativeBudget) {
         throw new ContextBudgetOverflowError(
-            `Final prepared model request (${totalRequestTokens} estimated tokens) exceeds preferred input budget (${budget.preferredInputTokens} tokens).`,
+            formatOverflow(
+                "Final prepared model request exceeds context budget",
+                totalRequestTokens,
+                authoritativeBudget,
+            ),
         );
     }
 
@@ -431,5 +613,6 @@ export const prepareBoundedModelRequest = (
         items: finalItems,
         tools: request.tools,
         signal: request.signal,
+        profile: effectiveProfile,
     };
 };

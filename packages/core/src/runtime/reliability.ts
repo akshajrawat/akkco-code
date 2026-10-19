@@ -137,6 +137,10 @@ export interface CycleDetectionResult {
     pattern?: string[];
 }
 
+/**
+ * Detects repeating cyclical sequences in tool call history across window lengths,
+ * terminating loops that oscillate between alternating tool strategies.
+ */
 export const detectRepeatedToolCycle = (
     history: readonly string[],
     newSignature: string,

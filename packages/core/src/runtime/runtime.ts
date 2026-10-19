@@ -30,6 +30,10 @@ const throwIfAborted = (signal?: AbortSignal) => {
     }
 };
 
+/**
+ * Core agent runtime coordinating the multi-turn model-tool execution loop
+ * while enforcing reliability controls and cycle detection.
+ */
 export const createAkkcoRuntime = (
     provider: ModelProvider,
     toolHost?: RuntimeToolHost,
@@ -53,22 +57,30 @@ export const createAkkcoRuntime = (
                 let cycleWarned = false;
                 let warnedCallSignature: string | undefined;
 
+                const isCompatProvider = provider.id.endsWith("-compatibility");
+
                 while (true) {
                     throwIfAborted(request.signal);
 
-                    const boundedRequest = prepareBoundedModelRequest({
-                        request: {
-                            items: workingItems,
-                            tools: toolHost?.tools,
-                            signal: request.signal,
-                        },
-                        budget: budget ?? DEFAULT_CONTEXT_BUDGET,
-                    });
+                    const effectiveRequest: ModelRequest = {
+                        items: workingItems,
+                        tools: toolHost?.tools,
+                        signal: request.signal,
+                        profile: request.profile,
+                    };
+
+                    const outgoingRequest: ModelRequest = isCompatProvider
+                        ? effectiveRequest
+                        : prepareBoundedModelRequest({
+                              request: effectiveRequest,
+                              budget,
+                              profile: request.profile,
+                          });
 
                     let turnAssistantText = "";
                     const toolCallEvents: ModelToolCallEvent[] = [];
 
-                    for await (const event of provider.stream(boundedRequest)) {
+                    for await (const event of provider.stream(outgoingRequest)) {
                         throwIfAborted(request.signal);
                         if (event.type === "text") {
                             turnAssistantText += event.content;

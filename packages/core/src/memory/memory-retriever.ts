@@ -34,6 +34,10 @@ export class DefaultConversationMemoryRetriever implements ConversationMemoryRet
         private readonly embeddingProvider?: EmbeddingProvider,
     ) {}
 
+    /**
+     * Generates an embedding vector for search queries, capturing provider identity
+     * and degrading gracefully if the embedding provider is offline.
+     */
     embedQuery = async (text: string, signal?: AbortSignal): Promise<QueryEmbedding | null> => {
         if (!this.embeddingProvider || !text.trim()) {
             return null;
@@ -67,6 +71,10 @@ export class DefaultConversationMemoryRetriever implements ConversationMemoryRet
         }
     };
 
+    /**
+     * Semantic memory search entrypoint that queries the conversation store for relevant
+     * past turns and ranks them by cosine similarity.
+     */
     retrieve = async (
         options: ConversationMemoryRetrieveOptions,
     ): Promise<ConversationMemoryCandidate[]> => {

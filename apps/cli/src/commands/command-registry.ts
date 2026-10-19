@@ -65,6 +65,10 @@ export class CommandRegistry {
         }));
     };
 
+    /**
+     * Dispatches slash-command input lines to registered command handlers,
+     * reporting errors for unknown commands without forwarding them to the model.
+     */
     dispatch = async (input: string, context: CommandContext): Promise<boolean> => {
         const trimmed = input.trim();
 

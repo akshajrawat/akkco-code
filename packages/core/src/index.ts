@@ -13,7 +13,14 @@ export {
     type ContextBudget,
     DEFAULT_CONTEXT_BUDGET,
     validateContextBudget,
+    calculateMaxInputTokens,
+    deriveContextBudget,
 } from "./context/budget.js";
+export {
+    createBoundedModelProvider,
+    BoundedModelProvider,
+    type BoundedModelProviderOptions,
+} from "./context/bounded-model-provider.js";
 export {
     prepareBoundedModelRequest,
     ContextBudgetOverflowError,
@@ -21,6 +28,17 @@ export {
     estimateRequestTokens,
     type PrepareBoundedModelRequestOptions,
 } from "./context/request-preparer.js";
+export {
+    DefaultContextCompactor,
+    createContextCompactor,
+    formatSummaryAsModelItem,
+    validateStructuredSummary,
+    type ContextCompactor,
+    type ContextCompactorOptions,
+    type StructuredSummary,
+    type CompactHistoryOptions,
+    type CompactToolResultOptions,
+} from "./context/context-compactor.js";
 export { estimateTokens, estimateModelItemTokens } from "./context/token-estimator.js";
 export {
     createMemoryDocumentFromTurn,

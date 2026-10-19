@@ -82,4 +82,32 @@ export interface ConversationStore {
     saveMemoryDocuments(docs: readonly MemoryDocumentInput[]): Promise<void>;
     searchMemory(query: MemorySearchQuery): Promise<MemoryCandidate[]>;
     getMemoryDocuments(sessionId: string): Promise<StoredMemoryDocument[]>;
+
+    saveContextSummary(summary: ContextSummaryInput): Promise<void>;
+    getContextSummaries(sessionId: string): Promise<StoredContextSummary[]>;
+    findContextSummary(
+        sessionId: string,
+        startSequence: number,
+        endSequence: number,
+    ): Promise<StoredContextSummary | null>;
+}
+
+export interface StoredContextSummary {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly startSequence: number;
+    readonly endSequence: number;
+    readonly summaryJson: string;
+    readonly estimatedTokens: number;
+    readonly createdAt: string;
+}
+
+export interface ContextSummaryInput {
+    readonly id?: string;
+    readonly sessionId: string;
+    readonly startSequence: number;
+    readonly endSequence: number;
+    readonly summaryJson: string;
+    readonly estimatedTokens: number;
+    readonly createdAt?: string;
 }

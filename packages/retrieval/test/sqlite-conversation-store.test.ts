@@ -11,7 +11,6 @@ test("SqliteConversationStore: isolated database creation and schema initializat
 
     const version = await store.getSchemaVersion();
     assert.equal(version, CURRENT_SCHEMA_VERSION);
-    assert.equal(version, 1);
 
     await store.close();
 });
@@ -23,7 +22,7 @@ test("SqliteConversationStore: schema initialization is idempotent", async () =>
     try {
         const store1 = new SqliteConversationStore({ dbPath });
         await store1.initialize();
-        assert.equal(await store1.getSchemaVersion(), 1);
+        assert.equal(await store1.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
         await store1.close();
 
         // Reopen same database file
@@ -31,7 +30,7 @@ test("SqliteConversationStore: schema initialization is idempotent", async () =>
         await store2.initialize();
         // Call initialize twice on the same instance
         await store2.initialize();
-        assert.equal(await store2.getSchemaVersion(), 1);
+        assert.equal(await store2.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
         await store2.close();
     } finally {
         await rm(tmpDir, { recursive: true, force: true });
@@ -272,11 +271,11 @@ test("F-009: Concurrent initialize calls share single promise and do not leak co
         store.initialize(),
     ]);
 
-    assert.equal(await store.getSchemaVersion(), 1);
+    assert.equal(await store.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
 
     // Repeat initialize call after already initialized is idempotent
     await store.initialize();
-    assert.equal(await store.getSchemaVersion(), 1);
+    assert.equal(await store.getSchemaVersion(), CURRENT_SCHEMA_VERSION);
 
     await store.close();
 });
@@ -331,6 +330,71 @@ test("F-014: searchMemory isolates corrupt vector rows and successfully returns 
 
     assert.equal(results.length, 1);
     assert.equal(results[0].document.content, "Valid memory document");
+
+    await store.close();
+});
+
+test("SqliteConversationStore: context summary persistence, lookup, and range uniqueness", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    const sessionId = "session-summary-test";
+    await store.saveSession({ id: sessionId });
+
+    const summaryPayload = JSON.stringify({
+        taskOrInvestigation: "Investigation of memory leak",
+        importantFindings: ["Found unclosed statement"],
+        filesAndLocations: ["packages/core/src/leak.ts"],
+        decisions: ["Close statement in finally"],
+        failedApproaches: [],
+        unresolvedIssues: [],
+        nextSteps: ["Verify tests"],
+        omissions: "None",
+        sourceRange: { sessionId, startSequence: 0, endSequence: 4 },
+    });
+
+    await store.saveContextSummary({
+        sessionId,
+        startSequence: 0,
+        endSequence: 4,
+        summaryJson: summaryPayload,
+        estimatedTokens: 120,
+    });
+
+    // Lookup by exact range
+    const found = await store.findContextSummary(sessionId, 0, 4);
+    assert.ok(found);
+    assert.equal(found.sessionId, sessionId);
+    assert.equal(found.startSequence, 0);
+    assert.equal(found.endSequence, 4);
+    assert.equal(found.summaryJson, summaryPayload);
+    assert.equal(found.estimatedTokens, 120);
+
+    // Lookup nonexistent range
+    const missing = await store.findContextSummary(sessionId, 5, 10);
+    assert.equal(missing, null);
+
+    // List all summaries for session
+    const all = await store.getContextSummaries(sessionId);
+    assert.equal(all.length, 1);
+    assert.equal(all[0].id, found.id);
+
+    // Idempotent upsert on conflict
+    const updatedPayload = JSON.stringify({
+        taskOrInvestigation: "Updated investigation",
+    });
+    await store.saveContextSummary({
+        sessionId,
+        startSequence: 0,
+        endSequence: 4,
+        summaryJson: updatedPayload,
+        estimatedTokens: 60,
+    });
+
+    const updated = await store.findContextSummary(sessionId, 0, 4);
+    assert.ok(updated);
+    assert.equal(updated.summaryJson, updatedPayload);
+    assert.equal(updated.estimatedTokens, 60);
 
     await store.close();
 });

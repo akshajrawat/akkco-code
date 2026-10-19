@@ -1,26 +1,40 @@
-import type { ModelItem } from "@akkco/models";
+import type { ModelItem, ModelProfile } from "@akkco/models";
 import type {
     ConversationMemoryCandidate,
     ConversationMemoryRetriever,
 } from "../memory/memory-retriever.js";
 import type { TranscriptItem } from "../transcript/types.js";
-import { type ContextBudget, DEFAULT_CONTEXT_BUDGET, validateContextBudget } from "./budget.js";
+import {
+    calculateMaxInputTokens,
+    type ContextBudget,
+    DEFAULT_CONTEXT_BUDGET,
+    deriveContextBudget,
+    validateContextBudget,
+} from "./budget.js";
 import { AGENT_POLICY, compileContext } from "./context-compiler.js";
+import { type ContextCompactor, formatSummaryAsModelItem } from "./context-compactor.js";
 import { estimateModelItemTokens, estimateTokens } from "./token-estimator.js";
 
 export interface ContextCompileInput {
     readonly transcript: readonly TranscriptItem[];
     readonly signal?: AbortSignal;
     readonly sessionId?: string;
+    readonly profile?: ModelProfile;
 }
 
 export interface ContextCompiler {
-    compile(input: ContextCompileInput): Promise<ModelItem[]>;
+    compile(
+        input: ContextCompileInput | readonly TranscriptItem[],
+        options?: Omit<ContextCompileInput, "transcript">,
+    ): Promise<ModelItem[]>;
 }
 
 export interface BoundedContextCompilerOptions {
     budget?: ContextBudget;
+    profile?: ModelProfile;
     memoryRetriever?: ConversationMemoryRetriever;
+    compactor?: ContextCompactor;
+    compactionThreshold?: number;
     sessionId?: string;
     includePolicy?: boolean;
     policy?: string;
@@ -36,28 +50,52 @@ interface HistoricalTurn {
 
 export class BoundedContextCompiler implements ContextCompiler {
     private readonly budget: ContextBudget;
+    private readonly profile?: ModelProfile;
     private readonly memoryRetriever?: ConversationMemoryRetriever;
+    private readonly compactor?: ContextCompactor;
+    private readonly compactionThreshold: number;
     private readonly sessionId?: string;
     private readonly includePolicy: boolean;
     private readonly policy: string;
     private readonly minSimilarity: number;
 
     constructor(options?: BoundedContextCompilerOptions) {
-        this.budget = options?.budget ?? DEFAULT_CONTEXT_BUDGET;
-        validateContextBudget(this.budget);
+        this.profile = options?.profile;
+        if (options?.budget) {
+            this.budget = options.budget;
+            validateContextBudget(this.budget);
+        } else if (options?.profile) {
+            this.budget = deriveContextBudget(options.profile);
+        } else {
+            this.budget = DEFAULT_CONTEXT_BUDGET;
+            validateContextBudget(this.budget);
+        }
         this.memoryRetriever = options?.memoryRetriever;
+        this.compactor = options?.compactor;
+        this.compactionThreshold = options?.compactionThreshold ?? 0.8;
         this.sessionId = options?.sessionId;
         this.includePolicy = options?.includePolicy ?? true;
         this.policy = options?.policy ?? AGENT_POLICY;
         this.minSimilarity = options?.minSimilarity ?? 0.5;
     }
 
-    compile = async (input: ContextCompileInput): Promise<ModelItem[]> => {
-        if (input.signal?.aborted) {
+    /**
+     * Asynchronously compiles a session transcript into bounded ModelItem context,
+     * using single percentage-based proportional allocation, AI compaction, and dynamic reclamation.
+     */
+    compile = async (
+        input: ContextCompileInput | readonly TranscriptItem[],
+        options?: Omit<ContextCompileInput, "transcript">,
+    ): Promise<ModelItem[]> => {
+        const resolvedInput: ContextCompileInput = Array.isArray(input)
+            ? { transcript: input as readonly TranscriptItem[], ...options }
+            : (input as ContextCompileInput);
+
+        if (resolvedInput.signal?.aborted) {
             throw new DOMException("The operation was aborted.", "AbortError");
         }
 
-        const transcript = input.transcript;
+        const transcript = resolvedInput.transcript;
         if (transcript.length === 0) {
             return this.includePolicy
                 ? [{ type: "message", role: "system", content: this.policy }]
@@ -81,24 +119,35 @@ export class BoundedContextCompiler implements ContextCompiler {
             });
         }
 
-        const currentPromptItem = transcript[currentPromptIndex];
-        if (currentPromptItem.type !== "user") {
-            return compileContext(transcript as TranscriptItem[], {
-                includePolicy: this.includePolicy,
-                policy: this.policy,
-            });
+        // Authoritative capacity determination
+        const effectiveProfile = resolvedInput.profile ?? this.profile;
+        let authoritativeCapacity: number;
+        let reservedOverhead: number;
+
+        if (effectiveProfile) {
+            const profileCap = calculateMaxInputTokens(effectiveProfile);
+            authoritativeCapacity = this.budget
+                ? Math.min(profileCap, this.budget.preferredInputTokens)
+                : profileCap;
+            reservedOverhead = this.budget?.reservedOverheadTokens ?? 0;
+        } else {
+            authoritativeCapacity = this.budget.preferredInputTokens;
+            reservedOverhead = this.budget.reservedOverheadTokens ?? 0;
         }
-        const currentPrompt = currentPromptItem.content;
 
-        // Effective token budget calculation
-        const effectiveBudget = Math.max(
-            0,
-            this.budget.preferredInputTokens - this.budget.reservedOverheadTokens,
-        );
+        const effectiveBudget = Math.max(0, authoritativeCapacity - reservedOverhead);
 
+        // Mandatory model-visible content deduction (policy + active turn items)
         const policyTokens = this.includePolicy ? estimateTokens(this.policy) + 4 : 0;
-        const currentPromptTokens = estimateTokens(currentPrompt) + 4;
-        const mandatoryTokens = policyTokens + currentPromptTokens;
+        const activeTurnItems = compileContext(
+            transcript.slice(currentPromptIndex) as TranscriptItem[],
+            { includePolicy: false },
+        );
+        const activeTurnTokens = activeTurnItems.reduce(
+            (sum, it) => sum + estimateModelItemTokens(it),
+            0,
+        );
+        const mandatoryTokens = policyTokens + activeTurnTokens;
 
         if (mandatoryTokens > effectiveBudget) {
             const { ContextBudgetOverflowError } = await import("./request-preparer.js");
@@ -107,34 +156,118 @@ export class BoundedContextCompiler implements ContextCompiler {
             );
         }
 
-        let remainingBudget = effectiveBudget - mandatoryTokens;
+        const discretionaryCapacity = effectiveBudget - mandatoryTokens;
+
+        if (discretionaryCapacity <= 0) {
+            const items: ModelItem[] = [];
+            if (this.includePolicy) {
+                items.push({
+                    type: "message",
+                    role: "system",
+                    content: this.policy,
+                    isPolicy: true,
+                    provenance: { source: "policy" },
+                });
+            }
+            items.push(...activeTurnItems);
+            return items;
+        }
 
         // Group previous transcript items into atomic logical turns
-        const historicalTurns = this.groupHistoricalTurns(transcript.slice(0, currentPromptIndex));
+        let historicalTurns = this.groupHistoricalTurns(transcript.slice(0, currentPromptIndex));
+        let compactedSummaryMessage: ModelItem | null = null;
+        let compactedStartSequence: number | undefined;
+        let compactedEndSequence: number | undefined;
 
-        // 1. Select minimum recent continuity walking backwards from newest to oldest
+        const activeSessionId = resolvedInput.sessionId ?? this.sessionId;
+        const totalHistoricalTokens = historicalTurns.reduce(
+            (sum, t) => sum + t.estimatedTokens,
+            0,
+        );
+        const totalContextEstimate = mandatoryTokens + totalHistoricalTokens;
+
+        // Trigger AI compaction when accumulated context crosses the threshold (~80%)
+        if (
+            this.compactor &&
+            historicalTurns.length > 1 &&
+            totalContextEstimate > effectiveBudget * this.compactionThreshold
+        ) {
+            // Keep the newest historical turn for continuity; compact older completed turns
+            const turnsToCompact = historicalTurns.slice(0, -1);
+            if (turnsToCompact.length > 0) {
+                const startSeq = turnsToCompact[0].startSequence;
+                const endSeq = turnsToCompact.at(-1)!.endSequence;
+                const itemsToCompact = turnsToCompact.flatMap((t) => t.items);
+
+                try {
+                    const summary = await this.compactor.compactHistory({
+                        items: itemsToCompact,
+                        startSequence: startSeq,
+                        endSequence: endSeq,
+                        sessionId: activeSessionId,
+                        signal: resolvedInput.signal,
+                    });
+
+                    if (summary) {
+                        compactedSummaryMessage = formatSummaryAsModelItem(summary);
+                        compactedStartSequence = startSeq;
+                        compactedEndSequence = endSeq;
+                        historicalTurns = historicalTurns.slice(-1);
+                    }
+                } catch (error) {
+                    if (
+                        resolvedInput.signal?.aborted ||
+                        (error instanceof Error && error.name === "AbortError")
+                    ) {
+                        throw error;
+                    }
+                    // Operational compaction failure: fallback gracefully to deterministic eviction
+                }
+            }
+        }
+
+        const summaryTokens = compactedSummaryMessage
+            ? estimateModelItemTokens(compactedSummaryMessage)
+            : 0;
+        const discretionaryAfterSummary = Math.max(0, discretionaryCapacity - summaryTokens);
+
+        // Proportional soft targets of discretionary capacity:
+        // Recent history: 25%, Memory: 30%, Repository: 30% (unimplemented, released), Flexible: 15%
+        const recentSoftTarget = Math.floor(discretionaryAfterSummary * 0.25);
+        const memorySoftTarget = Math.floor(discretionaryAfterSummary * 0.3);
+
+        // Explicit user limits from budget
+        const recentFloor =
+            this.budget.minimumRecentHistoryTokens !== undefined
+                ? Math.max(this.budget.minimumRecentHistoryTokens, recentSoftTarget)
+                : recentSoftTarget;
+
+        // 1. Initial recent conversation selection
+        // Reserve memory's allocation so memory has room if retriever is active
+        const memoryReservation = this.memoryRetriever
+            ? this.budget.maximumMemoryTokens !== undefined
+                ? Math.min(memorySoftTarget, this.budget.maximumMemoryTokens)
+                : memorySoftTarget
+            : 0;
+        const recentInitialBound = Math.max(0, discretionaryAfterSummary - memoryReservation);
+        const recentTarget = Math.min(recentFloor, recentInitialBound);
+
         const selectedRecentTurns: HistoricalTurn[] = [];
-        let minimumContinuityTokens = 0;
+        let recentTokensUsed = 0;
         let lastSelectedTurnIndex = historicalTurns.length;
 
         for (let i = historicalTurns.length - 1; i >= 0; i--) {
             const turn = historicalTurns[i];
-            if (
-                minimumContinuityTokens + turn.estimatedTokens <=
-                    this.budget.minimumRecentHistoryTokens &&
-                minimumContinuityTokens + turn.estimatedTokens <= remainingBudget
-            ) {
+            if (recentTokensUsed + turn.estimatedTokens <= recentTarget) {
                 selectedRecentTurns.unshift(turn);
-                minimumContinuityTokens += turn.estimatedTokens;
+                recentTokensUsed += turn.estimatedTokens;
                 lastSelectedTurnIndex = i;
             } else {
                 break;
             }
         }
 
-        remainingBudget = Math.max(0, remainingBudget - minimumContinuityTokens);
-
-        // Sequence range covered by current minimum recent history
+        // Sequence range covered by current selected recent history
         let recentStartSequence = Infinity;
         let recentEndSequence = -Infinity;
         if (selectedRecentTurns.length > 0) {
@@ -142,25 +275,36 @@ export class BoundedContextCompiler implements ContextCompiler {
             recentEndSequence = selectedRecentTurns.at(-1)!.endSequence;
         }
 
-        // 2. Retrieve memory candidates within remaining budget and maximumMemoryTokens ceiling
-        const memoryCeiling = Math.min(
-            this.budget.maximumMemoryTokens ?? remainingBudget,
-            remainingBudget,
-        );
+        // 2. Memory candidate retrieval and packing
+        const remainingAfterRecent = Math.max(0, discretionaryAfterSummary - recentTokensUsed);
+        const recentIsShort = lastSelectedTurnIndex === 0 || recentTokensUsed < recentSoftTarget;
+
+        const defaultSoftMemoryCap = Math.floor(authoritativeCapacity * 0.3);
+        const hasExplicitMemoryCap =
+            this.budget.maximumMemoryTokens !== undefined &&
+            this.budget.maximumMemoryTokens !== defaultSoftMemoryCap;
+
+        let memoryCeiling = remainingAfterRecent;
+        if (hasExplicitMemoryCap) {
+            memoryCeiling = Math.min(memoryCeiling, this.budget.maximumMemoryTokens!);
+        } else if (!recentIsShort) {
+            memoryCeiling = Math.min(memoryCeiling, memorySoftTarget);
+        }
 
         let retrievedContextMessage: ModelItem | null = null;
-        const activeSessionId = input.sessionId ?? this.sessionId;
+        const currentPromptItem = transcript[currentPromptIndex];
+        const currentPrompt = currentPromptItem.type === "user" ? currentPromptItem.content : "";
 
         if (this.memoryRetriever && memoryCeiling > 15) {
             let candidates: readonly ConversationMemoryCandidate[] = [];
             try {
                 candidates = await this.memoryRetriever.retrieve({
                     queryText: currentPrompt,
-                    signal: input.signal,
+                    signal: resolvedInput.signal,
                 });
             } catch (error) {
                 if (
-                    input.signal?.aborted ||
+                    resolvedInput.signal?.aborted ||
                     (error instanceof Error && error.name === "AbortError")
                 ) {
                     throw error;
@@ -181,20 +325,26 @@ export class BoundedContextCompiler implements ContextCompiler {
                 recentEndSequence,
                 memoryCeiling,
                 activeSessionId,
+                compactedStartSequence,
+                compactedEndSequence,
             );
-
-            if (retrievedContextMessage) {
-                const memoryTokensUsed = estimateModelItemTokens(retrievedContextMessage);
-                remainingBudget = Math.max(0, remainingBudget - memoryTokensUsed);
-            }
         }
 
-        // 3. Dynamic token reclamation: allocate remaining budget to older historical turns
+        const memoryTokensUsed = retrievedContextMessage
+            ? estimateModelItemTokens(retrievedContextMessage)
+            : 0;
+
+        // 3. Dynamic token reclamation: allocate ALL remaining capacity to older historical turns
+        let remainingForHistory = Math.max(
+            0,
+            discretionaryAfterSummary - recentTokensUsed - memoryTokensUsed,
+        );
+
         for (let i = lastSelectedTurnIndex - 1; i >= 0; i--) {
             const turn = historicalTurns[i];
-            if (turn.estimatedTokens <= remainingBudget) {
+            if (turn.estimatedTokens <= remainingForHistory) {
                 selectedRecentTurns.unshift(turn);
-                remainingBudget -= turn.estimatedTokens;
+                remainingForHistory -= turn.estimatedTokens;
             } else {
                 break;
             }
@@ -202,9 +352,10 @@ export class BoundedContextCompiler implements ContextCompiler {
 
         // Assemble final compiled items in strict deterministic order:
         // 1. Akkco policy
-        // 2. Retrieved historical context (untrusted historical data)
-        // 3. Recent conversation turns (chronological)
-        // 4. Current user request
+        // 2. Compacted summary message (untrusted background summary)
+        // 3. Retrieved historical context (untrusted background memory)
+        // 4. Recent conversation turns (chronological)
+        // 5. Active turn items
         const items: ModelItem[] = [];
 
         if (this.includePolicy) {
@@ -217,6 +368,10 @@ export class BoundedContextCompiler implements ContextCompiler {
             });
         }
 
+        if (compactedSummaryMessage) {
+            items.push(compactedSummaryMessage);
+        }
+
         if (retrievedContextMessage) {
             items.push(retrievedContextMessage);
         }
@@ -225,15 +380,15 @@ export class BoundedContextCompiler implements ContextCompiler {
             items.push(...turn.items);
         }
 
-        items.push({
-            type: "message",
-            role: "user",
-            content: currentPrompt,
-        });
+        items.push(...activeTurnItems);
 
         return items;
     };
 
+    /**
+     * Groups transcript items into atomic logical turns so conversational units
+     * can be packed or evicted without separating user requests from assistant replies.
+     */
     private groupHistoricalTurns = (
         transcriptSlice: readonly TranscriptItem[],
     ): HistoricalTurn[] => {
@@ -288,12 +443,18 @@ export class BoundedContextCompiler implements ContextCompiler {
         return turns;
     };
 
+    /**
+     * Deduplicates, relevance-filters, and frames retrieved memory excerpts as untrusted
+     * contextual data in a user message within the allocated memory token ceiling.
+     */
     private selectAndFrameMemoryCandidates = (
         candidates: readonly ConversationMemoryCandidate[],
         recentStart: number,
         recentEnd: number,
         memoryBudget: number,
         activeSessionId?: string,
+        compactedStart?: number,
+        compactedEnd?: number,
     ): ModelItem | null => {
         if (candidates.length === 0) {
             return null;
@@ -315,13 +476,25 @@ export class BoundedContextCompiler implements ContextCompiler {
                 continue;
             }
 
-            // Exclude ONLY if it overlaps with selected recent history IN THE SAME SESSION
+            // Exclude if it overlaps with selected recent history or compacted summary in the SAME session
             if (activeSessionId && doc.sessionId === activeSessionId) {
                 if (recentStart <= recentEnd) {
                     const overlapsRecent = !(
                         doc.endSequence < recentStart || doc.startSequence > recentEnd
                     );
                     if (overlapsRecent) {
+                        continue;
+                    }
+                }
+                if (
+                    compactedStart !== undefined &&
+                    compactedEnd !== undefined &&
+                    compactedStart <= compactedEnd
+                ) {
+                    const overlapsCompacted = !(
+                        doc.endSequence < compactedStart || doc.startSequence > compactedEnd
+                    );
+                    if (overlapsCompacted) {
                         continue;
                     }
                 }

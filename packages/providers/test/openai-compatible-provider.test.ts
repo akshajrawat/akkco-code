@@ -1156,3 +1156,103 @@ test("F-005: Cancellation with pre-buffered SSE stream (including [DONE]) termin
         (err: any) => err.name === "AbortError" || /aborted/i.test(err.message),
     );
 });
+
+// Milestone 1: Native Provider & Request Mapper Tests
+test("Milestone 1: mapModelRequestToOpenAIPayload maps maxOutputTokens to max_tokens", () => {
+    const request: ModelRequest = {
+        items: [{ type: "message", role: "user", content: "Hello" }],
+        profile: {
+            id: "test",
+            contextWindowTokens: 8192,
+            maxOutputTokens: 2048,
+            safetyMarginTokens: 512,
+            toolMode: "native",
+        },
+    };
+
+    const payload = mapModelRequestToOpenAIPayload(request, "test-model");
+    assert.strictEqual(payload.max_tokens, 2048);
+});
+
+test("Milestone 1: mapModelRequestToOpenAIPayload validates maxOutputTokens", () => {
+    const request: ModelRequest = {
+        items: [{ type: "message", role: "user", content: "Hello" }],
+        profile: {
+            id: "test",
+            contextWindowTokens: 8192,
+            maxOutputTokens: -1,
+            safetyMarginTokens: 512,
+            toolMode: "native",
+        },
+    };
+
+    assert.throws(() => mapModelRequestToOpenAIPayload(request, "test-model"), {
+        name: "RangeError",
+    });
+});
+
+test("Milestone 1: native tools are deterministically ordered in OpenAI payload", () => {
+    const toolZ: ModelTool = {
+        name: "zebra_tool",
+        description: "Zebra",
+        inputSchema: { type: "object" },
+    };
+    const toolA: ModelTool = {
+        name: "alpha_tool",
+        description: "Alpha",
+        inputSchema: { type: "object" },
+    };
+
+    const request: ModelRequest = {
+        items: [{ type: "message", role: "user", content: "Use tools" }],
+        tools: [toolZ, toolA], // passed in reverse alphabetical order
+    };
+
+    const payload = mapModelRequestToOpenAIPayload(request, "test-model");
+    assert.ok(payload.tools);
+    assert.strictEqual(payload.tools.length, 2);
+    // Alpha must come before Zebra
+    assert.strictEqual(payload.tools[0].function.name, "alpha_tool");
+    assert.strictEqual(payload.tools[1].function.name, "zebra_tool");
+    // Original tools array must not be mutated
+    assert.strictEqual(request.tools?.[0].name, "zebra_tool");
+});
+
+test("Milestone 1: Wire payload does not leak internal profile metadata", () => {
+    const request: ModelRequest = {
+        items: [
+            {
+                type: "message",
+                role: "user",
+                content: "Hello",
+                toolResultEnvelope: { callId: "c1", status: "success" },
+                isRepairInstruction: false,
+                isToolInstruction: false,
+            },
+        ],
+        profile: {
+            id: "test-model",
+            contextWindowTokens: 8192,
+            maxOutputTokens: 1024,
+            safetyMarginTokens: 256,
+            toolMode: "native",
+            charsPerToken: 4,
+            backend: "ollama",
+        },
+    };
+
+    const payload = mapModelRequestToOpenAIPayload(request, "test-model");
+    const jsonStr = JSON.stringify(payload);
+    const parsed = JSON.parse(jsonStr);
+
+    assert.strictEqual(parsed.model, "test-model");
+    assert.strictEqual(parsed.max_tokens, 1024);
+    assert.strictEqual(parsed.stream, true);
+    // Internal fields must NOT be present
+    assert.strictEqual(parsed.contextWindowTokens, undefined);
+    assert.strictEqual(parsed.safetyMarginTokens, undefined);
+    assert.strictEqual(parsed.charsPerToken, undefined);
+    assert.strictEqual(parsed.backend, undefined);
+    assert.strictEqual(parsed.messages[0].toolResultEnvelope, undefined);
+    assert.strictEqual(parsed.messages[0].isRepairInstruction, undefined);
+});

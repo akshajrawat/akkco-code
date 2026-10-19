@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export class MigrationError extends Error {
     constructor(message: string, cause?: unknown) {
@@ -43,6 +43,10 @@ export const getDefaultMigrationsDir = (): string => {
     return fileURLToPath(new URL("../../migrations", import.meta.url));
 };
 
+/**
+ * Discovers and parses SQL migration files, validating sequential version numbering,
+ * uniqueness, and SHA-256 checksum integrity.
+ */
 export const loadMigrations = async (migrationsDir: string): Promise<MigrationFile[]> => {
     const entries = await readdir(migrationsDir, { withFileTypes: true });
     const sqlEntries = entries.filter((e) => e.isFile() && e.name.endsWith(".sql"));
@@ -253,6 +257,10 @@ export const isSqliteBusy = (error: unknown): boolean => {
     return false;
 };
 
+/**
+ * Executes a database operation with exponential backoff and randomized jitter
+ * when encountering SQLITE_BUSY to prevent lock contention deadlocks.
+ */
 export const executeWithRetry = async <T>(
     fn: () => T,
     maxRetries = 10,
@@ -275,6 +283,10 @@ export const executeWithRetry = async <T>(
     }
 };
 
+/**
+ * Applies pending schema migrations forward within immediate write transactions,
+ * ensuring schema consistency and recorded version integrity.
+ */
 export const migrateDatabase = async (
     db: DatabaseSync,
     options?: MigrationOptions,

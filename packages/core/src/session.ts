@@ -5,6 +5,8 @@ import type { RuntimeEvent } from "./runtime/events.js";
 import type { AkkcoRuntime } from "./runtime/runtime.js";
 import type { TranscriptItem } from "./transcript/types.js";
 
+import type { ModelProfile } from "@akkco/models";
+
 const isAbortError = (error: unknown, signal?: AbortSignal) =>
     Boolean(signal?.aborted) ||
     (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message)));
@@ -14,12 +16,18 @@ export interface SessionOptions {
     readonly compiler?: ContextCompiler;
     readonly persistence?: SessionPersistence;
     readonly initialSequence?: number;
+    readonly profile?: ModelProfile;
 }
 
+/**
+ * Manages conversation lifecycle and exclusively owns the canonical transcript as the
+ * authoritative source of truth across user turns and tool executions.
+ */
 export class Session {
     readonly id: string;
     private readonly compiler?: ContextCompiler;
     private readonly persistence?: SessionPersistence;
+    private readonly profile?: ModelProfile;
     private readonly _transcript: TranscriptItem[];
     private _nextSequence: number;
     private _isRunning = false;
@@ -32,6 +40,7 @@ export class Session {
         this.id = options?.id ?? crypto.randomUUID();
         this.compiler = options?.compiler;
         this.persistence = options?.persistence;
+        this.profile = options?.profile;
         this._transcript = initialTranscript.map((item) => structuredClone(item));
         this._nextSequence = options?.initialSequence ?? initialTranscript.length;
     }
@@ -44,6 +53,10 @@ export class Session {
         return this._isRunning;
     }
 
+    /**
+     * Dispatches a user prompt through the session, driving context compilation,
+     * runtime agent turns, and incremental transcript persistence.
+     */
     send = (input: string, signal?: AbortSignal) => {
         const runtime = this.runtime;
         const internalTranscript = this._transcript;
@@ -74,7 +87,11 @@ export class Session {
                           })
                         : compileContext(internalTranscript);
 
-                    for await (const event of runtime.run({ items, signal })) {
+                    for await (const event of runtime.run({
+                        items,
+                        signal,
+                        profile: self.profile,
+                    })) {
                         if (signal?.aborted) {
                             const err = new Error("The operation was aborted");
                             err.name = "AbortError";

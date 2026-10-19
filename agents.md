@@ -4,13 +4,19 @@
 - Only use arrow functions, except where the language requires another form.
 - Always use async versions of file operations.
 - After every meaningful repo change, update `ARCHITECTURE.md` so it reflects the current methodology, package structure, and architecture.
-- Run the necessary tests, type checks, linters, and other relevant verification after making changes. Only run tests when you actually change something
+- Only run tests for actual code changes (never for comments, docs, or non-code edits). When running tests, only execute the specific test file relevant to that change; do not run the full test suite (`npm test`) each time unless completing a major milestone or making a major architectural change.
 - Dont keep again and again making a function if such function already exist anywhere from where it can be used
 - Only import the thing you want to use
 - Match the existing codebase’s spacing, indentation, line breaks, and surrounding formatting style; do not introduce a new formatting pattern when nearby code already establishes one.
 - Read `ARCHITECTURE.md` to get an idea of what we are building before any change
 - Always use `npm` as the package manager for running scripts and managing dependencies (do not use pnpm, yarn, or bun).
 - For changes affecting interactive TUI behavior, run the PTY E2E suite (`npm run test:tui`) in addition to normal unit/type/format verification.
+
+### Function Comments
+
+- Add a brief, high-level block comment (`/** ... */`) above functions that are architectural entrypoints, carry non-obvious invariants, or whose names alone do not fully explain their high-level purpose.
+- Do not add boilerplate comments to trivial, self-explanatory helpers whose names and signatures already make their behavior obvious.
+- Keep comments concise (1–2 sentences) and focused on _why_ the function exists or its role in the pipeline, rather than restating the code or listing `@param` / `@returns` tags.
 
 ### Public API Hygiene
 

@@ -12,13 +12,13 @@ akkco-code/
     └── tools/      → tool definition, registry & execution contracts
 ```
 
-1. `apps/cli` : This is the app that users see. It owns configuration, input/output, the Ink/React terminal UI, a plain stream renderer for piped usage, cancellation handling (SIGINT / AbortSignal), and interactive commands (`/exit`, `/clear`, `/tools`, `/tool <name> [json]`). All terminal presentation stays inside this application; internal packages have no dependency on Ink or React. Composition root injects providers, tool registries, storage persistence, and the bounded asynchronous context compiler into `Session`.
+1. `apps/cli` : This is the app that users see. It owns configuration, environment parsing (including model profiles `AKKCO_CONTEXT_WINDOW_TOKENS`, `AKKCO_MAX_OUTPUT_TOKENS`, `AKKCO_SAFETY_MARGIN_TOKENS`, `AKKCO_CHARS_PER_TOKEN`, `AKKCO_TOOL_MODE`), input/output, the Ink/React terminal UI, a plain stream renderer for piped usage, cancellation handling (SIGINT / AbortSignal), and interactive commands (`/exit`, `/clear`, `/tools`, `/tool <name> [json]`). All terminal presentation stays inside this application; internal packages have no dependency on Ink or React. Composition root resolves effective `ModelProfile`, configures bounded providers, and injects storage persistence and the bounded asynchronous context compiler into `Session`.
 
-2. `packages/core` : This is the main runtime and session logic (`Session → Runtime`). Organised into `runtime/` (`runtime.ts`, `events.ts`, `tool-host.ts`, `reliability.ts`), `session.ts`, `context/` (`context-compiler.ts`, `bounded-context-compiler.ts`, `budget.ts`, `token-estimator.ts`), `memory/` (`memory-document.ts`, `memory-orchestrator.ts`, `memory-retriever.ts`), and `transcript/` (`types.ts`). `Session` exclusively owns the canonical conversation transcript (`TranscriptItem[]`) as its internal source of truth. Before each request, an asynchronous `ContextCompiler` compiles a bounded, token-budgeted set of provider-neutral `ModelItem[]` for `Runtime`. `Runtime` coordinates the automatic model → tool → model agent loop across multiple turns using `RuntimeToolHost`, yielding `RuntimeEvent` with deterministic loop reliability controls.
+2. `packages/core` : This is the main runtime and session logic (`Session → Runtime`). Organised into `runtime/` (`runtime.ts`, `events.ts`, `tool-host.ts`, `reliability.ts`), `session.ts`, `context/` (`context-compiler.ts`, `bounded-context-compiler.ts`, `budget.ts`, `token-estimator.ts`, `request-preparer.ts`, `bounded-model-provider.ts`), `memory/` (`memory-document.ts`, `memory-orchestrator.ts`, `memory-retriever.ts`), and `transcript/` (`types.ts`). `Session` exclusively owns the canonical conversation transcript (`TranscriptItem[]`) as its internal source of truth. Before each request, an asynchronous `ContextCompiler` compiles a preliminary bounded set of provider-neutral `ModelItem[]` for `Runtime`. `Runtime` coordinates the automatic model → tool → model agent loop across multiple turns using `RuntimeToolHost`, yielding `RuntimeEvent` with deterministic loop reliability controls. Bounded provider wrappers (`BoundedModelProvider`) and `prepareBoundedModelRequest` enforce authoritative context budgeting at the final preflight stage before any network call.
 
-3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`, `embedding`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest`, `ModelEvent`, `ModelProvider`, `EmbeddingProvider`, and `EmbeddingIdentity`. In `testing/`, provides `FakeModelProvider` and deterministic offline `DeterministicFakeEmbeddingProvider` for reproducible ranking and similarity testing without randomness.
+3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`, `embedding`, `profile`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest`, `ModelEvent`, `ModelProvider`, `EmbeddingProvider`, `EmbeddingIdentity`, and `ModelProfile`. Provides profile resolution (`resolveModelProfile`) and validation (`validateModelProfile`) with conservative local presets (Qwen 2.5 Coder, Llama 3) and override hierarchies. In `testing/`, provides `FakeModelProvider` and deterministic offline `DeterministicFakeEmbeddingProvider` for reproducible ranking and similarity testing without randomness.
 
-4. `packages/providers` : Implements concrete providers connecting to model and embedding APIs using the common contracts. Under `openai-compatible/`, provides `OpenAICompatibleProvider` for chat completions and `OpenAICompatibleEmbeddingProvider` for `/embeddings`. Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`). Public API boundary is `packages/providers/src/index.ts`.
+4. `packages/providers` : Implements concrete providers connecting to model and embedding APIs using the common contracts. Under `openai-compatible/`, provides `OpenAICompatibleProvider` for chat completions (with `max_tokens` mapping and deterministic tool ordering) and `OpenAICompatibleEmbeddingProvider` for `/embeddings`. Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`) featuring deterministic tool ordering, compact schemas, and authoritative preflight preparation on initial, tool-loop, and repair requests. Public API boundary is `packages/providers/src/index.ts`.
 
 5. `packages/retrieval` : Manages SQLite-backed local persistence using Node.js built-in `node:sqlite` (`DatabaseSync`). Houses schema versioning (`schema_migrations`, `sessions`, `transcript_items`, `memory_documents`), vector BLOB serialization/deserialization with Float32Array precision, cosine similarity search primitives, and the `ConversationStore` / `SqliteConversationStore` implementation. Public API boundary is `packages/retrieval/src/index.ts`.
 
@@ -214,6 +214,129 @@ Compiled context follows a strict deterministic order:
 - **Graceful Retrieval Fallback**: Vector retrieval is an optimization. If the embedding endpoint is offline, SQLite retrieval fails, no documents match, or the embedding model identity differs from stored vectors, the Context Compiler degrades gracefully to policy + bounded recent history + current user request. Cancellation via `AbortSignal` is always respected immediately and never swallowed.
 - **Persistence Failure Semantics**: The in-memory Session transcript is updated synchronously and remains intact even if SQLite persistence encounters an error. Write errors on completed turns are propagated to notify the caller while ensuring in-memory transcript safety.
 - **Future Repository Retrieval Seam**: Prepared with dynamic capacity sharing (`maximumRepositoryTokens`), query embedding reuse, and candidate pool integration without implementing repository indexing in Task 1.
+
+## Model Profiles & Final-Stage Context Budgeting
+
+### ModelProfile Contract & Resolution Hierarchy
+
+A focused architectural invariant guarantees that every outbound model request respects its configured token capacity without mutating canonical transcripts or breaking tool continuity.
+
+`@akkco/models` defines the minimal provider-neutral `ModelProfile`:
+
+```ts
+export interface ModelProfile {
+    id: string;
+    backend?: string;
+    contextWindowTokens: number;
+    maxOutputTokens: number;
+    safetyMarginTokens?: number;
+    toolMode: "native" | "compatibility";
+    charsPerToken?: number;
+}
+```
+
+Resolution follows a strict 3-tier precedence hierarchy:
+
+1. **Conservative baseline defaults**:
+    - `contextWindowTokens`: 8192
+    - `maxOutputTokens`: 1024
+    - `safetyMarginTokens`: 256
+    - `charsPerToken`: 4
+    - `toolMode`: `"compatibility"`
+2. **Known model presets**:
+    - `qwen2.5-coder` (3B, 7B, 14B, 32B): 8192 window, 1024 max output, 256 safety margin, compatibility tool mode.
+    - `llama3` / `llama3.1` / `llama3.2`: 8192 window, 1024 max output, 256 safety margin, compatibility tool mode.
+3. **Explicit user/config overrides**:
+    - Evaluated at application composition (`apps/cli/src/config.ts` via `resolveCliModelProfile`).
+    - `AKKCO_CONTEXT_WINDOW_TOKENS`, `AKKCO_MAX_OUTPUT_TOKENS`, `AKKCO_SAFETY_MARGIN_TOKENS`, `AKKCO_CHARS_PER_TOKEN`, and `AKKCO_TOOL_MODE`.
+    - Explicit overrides always win.
+
+### Context Capacity Derivation & Division of Responsibilities
+
+Effective model input capacity is derived by:
+$$\text{maxInputTokens} = \text{contextWindowTokens} - \text{maxOutputTokens} - \text{safetyMarginTokens}$$
+
+Example with baseline (8192 / 1024 / 256):
+$$\text{maxInputTokens} = 8192 - 1024 - 256 = 6912 \text{ tokens}$$
+
+**Division of Responsibilities:**
+
+- **ModelProfile (`@akkco/models`)**: Defines raw physical limits, reserved generation space (`maxOutputTokens`), safety buffer (`safetyMarginTokens`), and character token estimation ratio (`charsPerToken`).
+- **ContextCompiler (`@akkco/core`)**: Determines conversational relevance, applies adaptive proportional context allocation, triggers AI compaction for accumulated history, and embeds persistent SQLite summaries while preserving active turn continuity.
+- **AI Compactor (`DefaultContextCompactor` in `@akkco/core`)**: Summarizes older historical turns into structured JSON summaries (findings, locations, decisions, failed approaches, unresolved issues, and omissions), ensuring strict non-recursiveness (`tools: undefined`) and persisting summaries to SQLite for multi-session reuse.
+- **Request Preparer (`prepareBoundedModelRequest` in `@akkco/core`)**: Acts as the authoritative, deterministic final safety boundary after all prompt expansions and transformations. Enforces mandatory items, projects tool results within available capacity, and fails closed with `ContextBudgetOverflowError`.
+
+### Adaptive Context Allocation
+
+Rather than imposing fixed ceilings (such as historical 1K or 2K caps), Akkco employs a single percentage-based allocator scaling across all context window sizes (from small 2K windows to 128K+):
+
+- **Proportional Soft Targets**:
+    - **Recent Conversation**: 25% of discretionary capacity.
+    - **Retrieved Memory**: 30% of discretionary capacity (with dynamic expansion if recent conversation is brief, bounded by explicit user hard limits).
+    - **Repository Evidence**: 30% soft target (released and dynamically reclaimed for conversational turns).
+    - **Flexible / Shared Capacity**: 15% discretionary buffer.
+- **Dynamic Token Reclamation**:
+    - Capacity unconsumed by memory or unimplemented repository pipelines is dynamically redistributed to historical turns, ensuring deep conversation history is preserved whenever headroom permits.
+    - Relevance thresholds, deduplication, and source provenance boundaries are strictly maintained; irrelevant data is never injected merely to fill capacity.
+- **Accurate Overhead Accounting**:
+    - Actual tool schemas, compatibility instructions, and message framing are accounted for directly in the final preflight rather than relying on arbitrary percentage inflation or double-counting safety margins.
+
+### AI-Assisted Context Compaction
+
+When accumulated conversational turns exceed the compaction threshold (~80% of effective budget), the `BoundedContextCompiler` invokes the AI compactor:
+
+- **Continuity Preservation**: The newest historical turn is always preserved intact alongside the active prompt, guaranteeing immediate conversational context and conversational continuity.
+- **Strict Non-Recursiveness**: The compactor invokes `provider.stream()` with `tools: undefined` and direct streaming, ensuring the compactor never executes tools or triggers nested agent loops.
+- **Structured Schema & Provenance**: The summary is formatted into structured JSON capturing task objectives, architectural findings, touched files, decisions made, failed approaches, unresolved questions, and omitted details. It is framed as an untrusted background context message with provenance source `"history"`.
+- **Persistent SQLite Storage & Cross-Session Reuse**: Summaries are persisted in SQLite (`context_summaries` table keyed by `(session_id, start_sequence, end_sequence)`). Subsequent turns or restarted sessions covering the same turn sequence retrieve the stored summary without duplicate LLM inference.
+- **Lossless Canonical Transcript**: Canonical transcripts in memory and SQLite remain completely lossless. Compaction is exclusively a context compilation projection; the complete turn record is preserved in storage.
+- **Operational Fault Tolerance**: Compactor errors or provider network failures degrade gracefully to standard turn eviction without corrupting history or crashing the agent session. Abort signals cleanly raise `AbortError`.
+
+### Deterministic Prefix & Token Accounting
+
+Outbound model requests follow a deterministic structural order:
+
+1. **Mandatory static system policy**: `AGENT_POLICY` or configured system instructions.
+2. **Compatibility tool instructions**: Deterministically generated instructions when in compatibility mode (`isToolInstruction: true`).
+3. **Compacted historical summary**: Untrusted background context message summarizing older turns.
+4. **Untrusted retrieved evidence**: Memory / repository documents framed with provenance in user messages.
+5. **Recent conversation history**: Prior turns preserved chronologically.
+6. **Active turn**: Current user prompt and active assistant tool calls / results.
+
+**Tool Schema Stability & Compaction:**
+
+- Tools advertised to the model are deterministically sorted by name (`tool.name.localeCompare`) without mutating the caller's array.
+- Parameter schemas are serialized as compact JSON (`JSON.stringify`) without pretty-printing indentation.
+- Tool schemas are accounted for exactly once: in compatibility mode, schemas are embedded into the system prompt; in native mode, tool schemas are counted via `estimateToolsTokens`.
+- Character-based token estimation uses `Math.ceil(length / charsPerToken)`, supporting model-specific `charsPerToken` configuration (defaulting conservatively to 4 chars/token).
+
+### Single Authoritative Final Preflight Boundary
+
+Every model invocation passes through final preflight preparation before hitting the network:
+
+- **Compatibility Mode**: Handled inside `TextToolCompatibilityProvider.stream()`, which invokes `prepareBoundedModelRequest` after expanding `<akkco_tool_call>` / `<akkco_tool_result>` envelopes on:
+    - Initial requests without tools.
+    - Normal agent turns with tools.
+    - Corrective protocol-repair turns (`COMPATIBILITY_REPAIR_INSTRUCTION`).
+- **Native Mode**: Wrapped by `BoundedModelProvider` (`createBoundedModelProvider`), ensuring request projection budgeting executes immediately before the wire mapper.
+- **Wire Mapping (`OpenAICompatibleProvider`)**: Maps `profile.maxOutputTokens` directly to the provider payload's `max_tokens`, ensuring inference engines enforce response truncation bounds. Provider-internal metadata (`profile`, `toolResultEnvelope`, etc.) is strictly isolated and never leaked to the wire.
+- **Simplified Proportional Tool Budgeting**: Superseded iterative fair-share loops and hardcoded 1,500-token caps are eliminated. In the event an active tool result exceeds remaining capacity, available tokens are distributed proportionally with an 8-token framing floor, ensuring deterministic budgeting.
+
+### Fail-Closed & Canonical Invariants
+
+1. **Canonical Transcript Losslessness**:
+    - The in-memory Session transcript (`TranscriptItem[]`) and SQLite store (`transcript_items`) are authoritative, complete historical records.
+    - Context trimming, AI compaction, and tool-result envelope truncation are temporary projections applied exclusively to outbound `ModelRequest.items`.
+    - The canonical records are never truncated, mutated, reordered, or deleted to fit a context budget.
+2. **Atomic Turn Trimming**:
+    - If historical context exceeds `maxInputTokens`, older turns are trimmed atomically as complete pairs (user prompt + assistant response, including all tool calls and tool results).
+    - Tool calls and tool results are never orphaned.
+3. **Safe Envelope Truncation**:
+    - If an active tool execution produces a payload that exceeds the remaining budget, the tool-result payload inside the envelope projection is truncated safely with an explicit truncation notice (`[Output truncated...]`), preserving envelope boundary tags (`<akkco_tool_result call_id="...">...</akkco_tool_result>`) and tool continuity.
+4. **Fail-Closed Budget Overflow**:
+    - If mandatory context (privileged system policy, tool protocol instructions, and the active user prompt) cannot fit within `maxInputTokens`, execution throws `ContextBudgetOverflowError` with detailed budget metrics before calling the model API. Oversized requests are never sent to providers.
+5. **Abort Correctness**:
+    - Cancellation (`AbortSignal`) retains priority throughout preparation, streaming, and protocol repair turns, cleanly raising `AbortError` without being converted into budget or compatibility errors.
 
 ## Development Guardrails
 

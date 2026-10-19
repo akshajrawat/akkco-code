@@ -14,12 +14,21 @@ export interface ModelMessageProvenance {
     readonly documents?: readonly ModelMessageDocumentProvenance[];
 }
 
+export interface ModelToolResultEnvelopeMetadata {
+    readonly callId: string;
+    readonly status: "success" | "error";
+    readonly rawBody?: string;
+}
+
 export interface ModelMessage {
     type: "message";
     role: MessageRole;
     content: string;
     readonly isPolicy?: boolean;
     readonly provenance?: ModelMessageProvenance;
+    readonly toolResultEnvelope?: ModelToolResultEnvelopeMetadata;
+    readonly isRepairInstruction?: boolean;
+    readonly isToolInstruction?: boolean;
 }
 
 export interface ModelToolCall {

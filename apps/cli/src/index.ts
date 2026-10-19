@@ -3,7 +3,16 @@ import { createTextToolCompatibilityProvider, OpenAICompatibleProvider } from "@
 import { createRepositoryTools, createToolRegistry } from "@akkco/tools";
 import { readFile } from "node:fs/promises";
 import process, { stdin, stdout } from "node:process";
-import { DEFAULT_MODEL, parseMaxToolIterations, parseToolMode } from "./config.js";
+import {
+    DEFAULT_MODEL,
+    parseCharsPerToken,
+    parseContextWindowTokens,
+    parseMaxOutputTokens,
+    parseMaxToolIterations,
+    parseSafetyMarginTokens,
+    parseToolMode,
+    resolveCliModelProfile,
+} from "./config.js";
 import { runPlainCli } from "./plain-cli.js";
 import { createCliController } from "./state/cli-controller.js";
 import type { CliMetadata } from "./state/types.js";
@@ -26,10 +35,25 @@ process.emitWarning = function (warning: string | Error, ...args: unknown[]) {
 };
 
 const main = async () => {
-    const toolMode = parseToolMode(process.env.AKKCO_TOOL_MODE);
+    const toolModeOverride = process.env.AKKCO_TOOL_MODE
+        ? parseToolMode(process.env.AKKCO_TOOL_MODE)
+        : undefined;
     const maxToolIterations = parseMaxToolIterations(process.env.AKKCO_MAX_TOOL_ITERATIONS);
+    const contextWindowTokens = parseContextWindowTokens(process.env.AKKCO_CONTEXT_WINDOW_TOKENS);
+    const maxOutputTokens = parseMaxOutputTokens(process.env.AKKCO_MAX_OUTPUT_TOKENS);
+    const safetyMarginTokens = parseSafetyMarginTokens(process.env.AKKCO_SAFETY_MARGIN_TOKENS);
+    const charsPerToken = parseCharsPerToken(process.env.AKKCO_CHARS_PER_TOKEN);
 
     const model = process.env.AKKCO_MODEL ?? DEFAULT_MODEL;
+
+    const effectiveProfile = resolveCliModelProfile(model, {
+        toolMode: toolModeOverride,
+        contextWindowTokens,
+        maxOutputTokens,
+        safetyMarginTokens,
+        charsPerToken,
+    });
+
     let nativeProvider: ModelProvider;
     let providerName = "OpenAICompatible";
 
@@ -48,18 +72,23 @@ const main = async () => {
         });
     }
 
-    const { prepareBoundedModelRequest, DEFAULT_CONTEXT_BUDGET } = await import("@akkco/core");
+    const { prepareBoundedModelRequest, createBoundedModelProvider, deriveContextBudget } =
+        await import("@akkco/core");
+
+    const boundedNativeProvider = createBoundedModelProvider(nativeProvider, {
+        profile: effectiveProfile,
+    });
 
     const provider =
-        toolMode === "compatibility"
+        effectiveProfile.toolMode === "compatibility"
             ? createTextToolCompatibilityProvider(nativeProvider, {
                   prepareRequest: (req) =>
                       prepareBoundedModelRequest({
                           request: req,
-                          budget: DEFAULT_CONTEXT_BUDGET,
+                          profile: effectiveProfile,
                       }),
               })
-            : nativeProvider;
+            : boundedNativeProvider;
 
     const isTestMode = Boolean(
         process.env.AKKCO_TEST_PROVIDER ||
@@ -124,10 +153,17 @@ const main = async () => {
     }
 
     const sessionId = process.env.AKKCO_SESSION_ID ?? (await import("node:crypto")).randomUUID();
-    const { createBoundedContextCompiler } = await import("@akkco/core");
+    const contextBudget = deriveContextBudget(effectiveProfile);
+    const { createBoundedContextCompiler, createContextCompactor } = await import("@akkco/core");
+    const compactor = createContextCompactor({
+        provider,
+        profile: effectiveProfile,
+        store: store ?? undefined,
+    });
     const compiler = createBoundedContextCompiler({
-        budget: DEFAULT_CONTEXT_BUDGET,
+        budget: contextBudget,
         memoryRetriever: retriever,
+        compactor,
         sessionId,
     });
 
@@ -138,6 +174,7 @@ const main = async () => {
         compiler,
         persistence: orchestrator,
         sessionId,
+        profile: effectiveProfile,
     });
 
     const manifest = JSON.parse(
@@ -148,7 +185,7 @@ const main = async () => {
         version: String(manifest.version),
         provider: providerName,
         model,
-        toolMode,
+        toolMode: effectiveProfile.toolMode,
         cwd: process.cwd(),
     };
 

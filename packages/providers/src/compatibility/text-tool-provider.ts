@@ -35,6 +35,10 @@ export interface TextToolCompatibilityProviderOptions {
     readonly prepareRequest?: (request: ModelRequest) => ModelRequest;
 }
 
+/**
+ * ModelProvider wrapper implementing textual tool-calling compatibility, supporting pre-tool prose streaming,
+ * envelope buffering, and deterministic 1-turn repair recovery.
+ */
 export class TextToolCompatibilityProvider implements ModelProvider {
     readonly id: string;
 
@@ -155,7 +159,10 @@ export class TextToolCompatibilityProvider implements ModelProvider {
 
                 const hasTools = Boolean(request.tools && request.tools.length > 0);
                 if (!hasTools) {
-                    yield* self.provider.stream(request);
+                    const prepared = self.options?.prepareRequest
+                        ? self.options.prepareRequest(request)
+                        : request;
+                    yield* self.provider.stream(prepared);
                     return;
                 }
 
@@ -168,9 +175,14 @@ export class TextToolCompatibilityProvider implements ModelProvider {
                     items: compatItems,
                     tools: undefined,
                     signal: request.signal,
+                    profile: request.profile,
                 };
 
-                const turn1 = yield* self.readTurn(initialRequest);
+                const preparedInitial = self.options?.prepareRequest
+                    ? self.options.prepareRequest(initialRequest)
+                    : initialRequest;
+
+                const turn1 = yield* self.readTurn(preparedInitial);
                 if (turn1.nativeToolCallEmitted) {
                     return;
                 }
@@ -212,6 +224,7 @@ export class TextToolCompatibilityProvider implements ModelProvider {
                         type: "message",
                         role: "user",
                         content: COMPATIBILITY_REPAIR_INSTRUCTION,
+                        isRepairInstruction: true,
                     },
                 ];
 
@@ -219,6 +232,7 @@ export class TextToolCompatibilityProvider implements ModelProvider {
                     items: repairItems,
                     tools: undefined,
                     signal: request.signal,
+                    profile: request.profile,
                 };
 
                 const boundedRepairRequest = self.options?.prepareRequest

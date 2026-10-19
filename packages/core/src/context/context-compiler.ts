@@ -12,6 +12,10 @@ export interface CompileContextOptions {
     policy?: string;
 }
 
+/**
+ * Compiles a raw canonical transcript into a provider-neutral ModelItem sequence,
+ * injecting policy and converting transcript statuses into appropriate message and tool items.
+ */
 export const compileContext = (
     transcript: TranscriptItem[],
     options?: CompileContextOptions,

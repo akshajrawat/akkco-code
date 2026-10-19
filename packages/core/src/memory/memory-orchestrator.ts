@@ -19,6 +19,10 @@ export interface SessionPersistence {
     ): Promise<void>;
 }
 
+/**
+ * Orchestrates transcript record persistence and asynchronous background memory indexing
+ * with timeout bounding and drain coordination during session shutdown.
+ */
 export class ConversationMemoryOrchestrator implements SessionPersistence {
     private readonly inFlightIndexing = new Set<Promise<void>>();
 
@@ -46,6 +50,10 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
         await this.store.saveTranscriptItems(sessionId, records);
     };
 
+    /**
+     * Handles completed turn persistence by deriving a memory document and indexing it
+     * with an embedding vector in the background with a bounded timeout.
+     */
     onTurnCompleted = async (
         sessionId: string,
         turnItems: readonly TranscriptItem[],

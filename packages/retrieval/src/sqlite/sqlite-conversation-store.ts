@@ -1,18 +1,21 @@
 import "./suppress-warning.js";
+import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+    ContextSummaryInput,
     ConversationStore,
     MemoryCandidate,
     MemoryDocumentInput,
     MemorySearchQuery,
+    StoredContextSummary,
     StoredMemoryDocument,
     StoredSession,
     StoredTranscriptRecord,
 } from "../types.js";
 import { cosineSimilarity } from "./cosine.js";
-import { CURRENT_SCHEMA_VERSION, migrateDatabase } from "./migrations.js";
+import { CURRENT_SCHEMA_VERSION, executeWithRetry, migrateDatabase } from "./migrations.js";
 import { deserializeVector, serializeVector } from "./vector-serializer.js";
 
 export interface SqliteConversationStoreOptions {
@@ -20,6 +23,10 @@ export interface SqliteConversationStoreOptions {
     migrationsDir?: string;
 }
 
+/**
+ * SQLite-backed persistence store managing sessions, canonical transcript records,
+ * and vector-indexed conversation memory documents.
+ */
 export class SqliteConversationStore implements ConversationStore {
     private db: DatabaseSync | null = null;
     private initPromise: Promise<void> | null = null;
@@ -38,6 +45,10 @@ export class SqliteConversationStore implements ConversationStore {
         return this.db;
     };
 
+    /**
+     * Initializes SQLite connection, enables foreign keys and busy timeouts, and executes
+     * pending migrations with in-flight initialization deduplication.
+     */
     initialize = async (): Promise<void> => {
         if (this.db) {
             return;
@@ -276,6 +287,10 @@ export class SqliteConversationStore implements ConversationStore {
         }
     };
 
+    /**
+     * Searches stored memory documents using cosine similarity against query vectors,
+     * filtering by session and sequence boundaries while isolating corrupt rows.
+     */
     searchMemory = async (query: MemorySearchQuery): Promise<MemoryCandidate[]> => {
         const db = this.getDb();
         const dimensions = query.identity.dimensions ?? query.vector.length;
@@ -406,5 +421,105 @@ export class SqliteConversationStore implements ConversationStore {
             embeddingDimensions: row.embedding_dimensions,
             createdAt: row.created_at,
         }));
+    };
+
+    saveContextSummary = async (summary: ContextSummaryInput): Promise<void> => {
+        const db = this.getDb();
+        const id = summary.id ?? randomUUID();
+        const createdAt = summary.createdAt ?? new Date().toISOString();
+
+        await this.saveSession({ id: summary.sessionId });
+
+        await executeWithRetry(() => {
+            const stmt = db.prepare(`
+                INSERT INTO context_summaries (
+                    id, session_id, start_sequence, end_sequence,
+                    summary_json, estimated_tokens, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, start_sequence, end_sequence)
+                DO UPDATE SET
+                    summary_json = excluded.summary_json,
+                    estimated_tokens = excluded.estimated_tokens,
+                    created_at = excluded.created_at;
+            `);
+            stmt.run(
+                id,
+                summary.sessionId,
+                summary.startSequence,
+                summary.endSequence,
+                summary.summaryJson,
+                summary.estimatedTokens,
+                createdAt,
+            );
+        });
+    };
+
+    getContextSummaries = async (sessionId: string): Promise<StoredContextSummary[]> => {
+        const db = this.getDb();
+        const rows = db
+            .prepare(
+                `SELECT id, session_id, start_sequence, end_sequence, summary_json, estimated_tokens, created_at
+                 FROM context_summaries
+                 WHERE session_id = ?
+                 ORDER BY start_sequence ASC`,
+            )
+            .all(sessionId) as Array<{
+            id: string;
+            session_id: string;
+            start_sequence: number;
+            end_sequence: number;
+            summary_json: string;
+            estimated_tokens: number;
+            created_at: string;
+        }>;
+
+        return rows.map((r) => ({
+            id: r.id,
+            sessionId: r.session_id,
+            startSequence: r.start_sequence,
+            endSequence: r.end_sequence,
+            summaryJson: r.summary_json,
+            estimatedTokens: r.estimated_tokens,
+            createdAt: r.created_at,
+        }));
+    };
+
+    findContextSummary = async (
+        sessionId: string,
+        startSequence: number,
+        endSequence: number,
+    ): Promise<StoredContextSummary | null> => {
+        const db = this.getDb();
+        const row = db
+            .prepare(
+                `SELECT id, session_id, start_sequence, end_sequence, summary_json, estimated_tokens, created_at
+                 FROM context_summaries
+                 WHERE session_id = ? AND start_sequence = ? AND end_sequence = ?`,
+            )
+            .get(sessionId, startSequence, endSequence) as
+            | {
+                  id: string;
+                  session_id: string;
+                  start_sequence: number;
+                  end_sequence: number;
+                  summary_json: string;
+                  estimated_tokens: number;
+                  created_at: string;
+              }
+            | undefined;
+
+        if (!row) {
+            return null;
+        }
+
+        return {
+            id: row.id,
+            sessionId: row.session_id,
+            startSequence: row.start_sequence,
+            endSequence: row.end_sequence,
+            summaryJson: row.summary_json,
+            estimatedTokens: row.estimated_tokens,
+            createdAt: row.created_at,
+        };
     };
 }
