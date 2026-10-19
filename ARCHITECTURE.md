@@ -263,8 +263,8 @@ $$\text{maxInputTokens} = 8192 - 1024 - 256 = 6912 \text{ tokens}$$
 
 - **ModelProfile (`@akkco/models`)**: Defines raw physical limits, reserved generation space (`maxOutputTokens`), safety buffer (`safetyMarginTokens`), and character token estimation ratio (`charsPerToken`).
 - **ContextCompiler (`@akkco/core`)**: Determines conversational relevance, applies adaptive proportional context allocation, triggers AI compaction for accumulated history, and embeds persistent SQLite summaries while preserving active turn continuity.
-- **AI Compactor (`DefaultContextCompactor` in `@akkco/core`)**: Summarizes older historical turns into structured JSON summaries (findings, locations, decisions, failed approaches, unresolved issues, and omissions), ensuring strict non-recursiveness (`tools: undefined`) and persisting summaries to SQLite for multi-session reuse.
-- **Request Preparer (`prepareBoundedModelRequest` in `@akkco/core`)**: Acts as the authoritative, deterministic final safety boundary after all prompt expansions and transformations. Enforces mandatory items, projects tool results within available capacity, and fails closed with `ContextBudgetOverflowError`.
+- **AI Compactor (`DefaultContextCompactor` in `@akkco/core`)**: Asynchronous, semantic transformation system. Summarizes older historical turns into structured JSON summaries (findings, locations, decisions, failed approaches, unresolved issues, next steps, and omissions), and compacts active oversized tool results before final preflight. Reuses persistent prefix summaries from SQLite (`findLatestContextSummary`) and prunes intermediate superseded checkpoints. Operates strictly without tools (`tools: undefined`) and bounds compaction requests to the compactor model's capacity.
+- **Request Preparer (`prepareBoundedModelRequest` in `@akkco/core`)**: Authoritative, synchronous, deterministic final budget-enforcement boundary after all prompt expansions and transformations. Performs zero model inference and zero character-based truncation; enforces mandatory items, bounds recent history atomically by turns, and strictly fails closed with `ContextBudgetOverflowError` if any uncompacted or mandatory item exceeds available budget.
 
 ### Adaptive Context Allocation
 
@@ -272,9 +272,11 @@ Rather than imposing fixed ceilings (such as historical 1K or 2K caps), Akkco em
 
 - **Proportional Soft Targets**:
     - **Recent Conversation**: 25% of discretionary capacity.
-    - **Retrieved Memory**: 30% of discretionary capacity (with dynamic expansion if recent conversation is brief, bounded by explicit user hard limits).
+    - **Retrieved Memory**: 30% of discretionary capacity (with dynamic expansion if recent conversation is brief).
     - **Repository Evidence**: 30% soft target (released and dynamically reclaimed for conversational turns).
     - **Flexible / Shared Capacity**: 15% discretionary buffer.
+- **Explicit Hard Limits (`isHardMemoryLimit`)**:
+    - User-specified hard memory caps are explicitly flagged with `isHardMemoryLimit: true` and strictly enforced, preventing heuristic confusion between default soft targets and intentional user limits.
 - **Dynamic Token Reclamation**:
     - Capacity unconsumed by memory or unimplemented repository pipelines is dynamically redistributed to historical turns, ensuring deep conversation history is preserved whenever headroom permits.
     - Relevance thresholds, deduplication, and source provenance boundaries are strictly maintained; irrelevant data is never injected merely to fill capacity.
@@ -283,13 +285,22 @@ Rather than imposing fixed ceilings (such as historical 1K or 2K caps), Akkco em
 
 ### AI-Assisted Context Compaction
 
-When accumulated conversational turns exceed the compaction threshold (~80% of effective budget), the `BoundedContextCompiler` invokes the AI compactor:
+When accumulated conversational turns exceed the compaction threshold (~80% of effective budget) or an active tool result exceeds its allowable token budget (`maxToolOutputTokens` or available capacity), the AI compactor is invoked:
 
 - **Continuity Preservation**: The newest historical turn is always preserved intact alongside the active prompt, guaranteeing immediate conversational context and conversational continuity.
-- **Strict Non-Recursiveness**: The compactor invokes `provider.stream()` with `tools: undefined` and direct streaming, ensuring the compactor never executes tools or triggers nested agent loops.
-- **Structured Schema & Provenance**: The summary is formatted into structured JSON capturing task objectives, architectural findings, touched files, decisions made, failed approaches, unresolved questions, and omitted details. It is framed as an untrusted background context message with provenance source `"history"`.
-- **Persistent SQLite Storage & Cross-Session Reuse**: Summaries are persisted in SQLite (`context_summaries` table keyed by `(session_id, start_sequence, end_sequence)`). Subsequent turns or restarted sessions covering the same turn sequence retrieve the stored summary without duplicate LLM inference.
-- **Lossless Canonical Transcript**: Canonical transcripts in memory and SQLite remain completely lossless. Compaction is exclusively a context compilation projection; the complete turn record is preserved in storage.
+- **Active Tool-Result Compaction (`compactToolResult`)**:
+    - Integrated directly into the runtime agent loop (`AkkcoRuntime`) and context compilation (`BoundedContextCompiler`).
+    - Compresses large tool payloads into structured summaries highlighting tool name, call ID, file paths, line numbers, errors, exit codes, and structural findings.
+    - Enforces strict sizing ($tokens \le target$) with zero 1.5x tolerance; oversized compaction outputs fail closed.
+    - Preserves explicit provenance and omission notes (`[Canonical transcript retains full original output (... characters). Details omitted for token budget.]`).
+- **Incremental Compaction & Prefix Reuse**:
+    - Leverages `findLatestContextSummary` in SQLite to reuse existing prefix summaries (e.g., combining an existing summary for sequences 1–20 with delta turns 21–25 into a consolidated 1–25 summary).
+    - Guarantees zero duplicate LLM calls on exact cache hits.
+    - Automatically prunes superseded intermediate checkpoints from SQLite (`context_summaries`) upon saving a broader consolidated summary.
+- **Bounded Compaction Invocations**:
+    - Compactor model input capacity is respected: history turns and oversized tool outputs exceeding compactor capacity are chunked logically (line-by-line for tool outputs, turn-by-turn for history) and merged into a consolidated summary.
+    - Compaction model requests strictly enforce `tools: undefined`, ensuring compaction never triggers nested tool loops.
+- **Lossless Canonical Transcript**: Canonical transcripts in memory (`Session`) and SQLite (`transcript_items`) remain completely lossless and unaltered. Compaction is exclusively a working context projection.
 - **Operational Fault Tolerance**: Compactor errors or provider network failures degrade gracefully to standard turn eviction without corrupting history or crashing the agent session. Abort signals cleanly raise `AbortError`.
 
 ### Deterministic Prefix & Token Accounting
@@ -308,35 +319,30 @@ Outbound model requests follow a deterministic structural order:
 - Tools advertised to the model are deterministically sorted by name (`tool.name.localeCompare`) without mutating the caller's array.
 - Parameter schemas are serialized as compact JSON (`JSON.stringify`) without pretty-printing indentation.
 - Tool schemas are accounted for exactly once: in compatibility mode, schemas are embedded into the system prompt; in native mode, tool schemas are counted via `estimateToolsTokens`.
-- Character-based token estimation uses `Math.ceil(length / charsPerToken)`, supporting model-specific `charsPerToken` configuration (defaulting conservatively to 4 chars/token).
+- Character-based token estimation uses `Math.ceil(length / charsPerToken)`, supporting model-specific `charsPerToken` configuration (propagated consistently to compiler, compactor, runtime, and request-preparer).
 
 ### Single Authoritative Final Preflight Boundary
 
-Every model invocation passes through final preflight preparation before hitting the network:
+Every model invocation passes through final preflight preparation (`prepareBoundedModelRequest`) before hitting the network:
 
-- **Compatibility Mode**: Handled inside `TextToolCompatibilityProvider.stream()`, which invokes `prepareBoundedModelRequest` after expanding `<akkco_tool_call>` / `<akkco_tool_result>` envelopes on:
-    - Initial requests without tools.
-    - Normal agent turns with tools.
-    - Corrective protocol-repair turns (`COMPATIBILITY_REPAIR_INSTRUCTION`).
+- **Compatibility Mode**: Handled inside `TextToolCompatibilityProvider.stream()`, which invokes `prepareBoundedModelRequest` after expanding `<akkco_tool_call>` / `<akkco_tool_result>` envelopes on initial requests, normal tool turns, and corrective protocol-repair turns (`COMPATIBILITY_REPAIR_INSTRUCTION`).
 - **Native Mode**: Wrapped by `BoundedModelProvider` (`createBoundedModelProvider`), ensuring request projection budgeting executes immediately before the wire mapper.
 - **Wire Mapping (`OpenAICompatibleProvider`)**: Maps `profile.maxOutputTokens` directly to the provider payload's `max_tokens`, ensuring inference engines enforce response truncation bounds. Provider-internal metadata (`profile`, `toolResultEnvelope`, etc.) is strictly isolated and never leaked to the wire.
-- **Simplified Proportional Tool Budgeting**: Superseded iterative fair-share loops and hardcoded 1,500-token caps are eliminated. In the event an active tool result exceeds remaining capacity, available tokens are distributed proportionally with an 8-token framing floor, ensuring deterministic budgeting.
+- **Elimination of Competing Systems**: Legacy character-based slicing (`truncateToolResult`, `truncateCompatibilityToolResult`, `truncateAnyToolResult`) and proportional tool fair-share allocation loops (`allocateToolResultBudgets`) are completely eliminated. Request preparation is strictly synchronous, deterministic, and fails closed.
 
 ### Fail-Closed & Canonical Invariants
 
 1. **Canonical Transcript Losslessness**:
     - The in-memory Session transcript (`TranscriptItem[]`) and SQLite store (`transcript_items`) are authoritative, complete historical records.
-    - Context trimming, AI compaction, and tool-result envelope truncation are temporary projections applied exclusively to outbound `ModelRequest.items`.
-    - The canonical records are never truncated, mutated, reordered, or deleted to fit a context budget.
+    - AI compaction is a temporary projection applied to working items and outbound requests.
+    - Canonical records are never truncated, sliced, mutated, reordered, or deleted to fit a context budget.
 2. **Atomic Turn Trimming**:
     - If historical context exceeds `maxInputTokens`, older turns are trimmed atomically as complete pairs (user prompt + assistant response, including all tool calls and tool results).
     - Tool calls and tool results are never orphaned.
-3. **Safe Envelope Truncation**:
-    - If an active tool execution produces a payload that exceeds the remaining budget, the tool-result payload inside the envelope projection is truncated safely with an explicit truncation notice (`[Output truncated...]`), preserving envelope boundary tags (`<akkco_tool_result call_id="...">...</akkco_tool_result>`) and tool continuity.
-4. **Fail-Closed Budget Overflow**:
-    - If mandatory context (privileged system policy, tool protocol instructions, and the active user prompt) cannot fit within `maxInputTokens`, execution throws `ContextBudgetOverflowError` with detailed budget metrics before calling the model API. Oversized requests are never sent to providers.
-5. **Abort Correctness**:
-    - Cancellation (`AbortSignal`) retains priority throughout preparation, streaming, and protocol repair turns, cleanly raising `AbortError` without being converted into budget or compatibility errors.
+3. **Fail-Closed Budget Overflow**:
+    - If mandatory context (privileged system policy, tool protocol instructions, active user prompt) or uncompacted tool results exceed available capacity, execution throws `ContextBudgetOverflowError` before calling the model API. Oversized requests are never sent to providers.
+4. **Abort Correctness**:
+    - Cancellation (`AbortSignal`) retains priority throughout preparation, streaming, compaction, and protocol repair turns, cleanly raising `AbortError` without being converted into budget or compatibility errors.
 
 ## Development Guardrails
 

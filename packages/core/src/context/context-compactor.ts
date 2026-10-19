@@ -1,5 +1,6 @@
 import type { ModelItem, ModelProfile, ModelProvider, ModelRequest } from "@akkco/models";
 import type { ConversationStore } from "@akkco/retrieval";
+import { calculateMaxInputTokens } from "./budget.js";
 import { estimateModelItemTokens, estimateTokens } from "./token-estimator.js";
 
 export interface StructuredSummary {
@@ -24,6 +25,11 @@ export interface CompactHistoryOptions {
     readonly endSequence: number;
     readonly sessionId?: string;
     readonly signal?: AbortSignal;
+    readonly turns?: readonly {
+        readonly startSequence: number;
+        readonly endSequence: number;
+        readonly items: readonly ModelItem[];
+    }[];
 }
 
 export interface CompactToolResultOptions {
@@ -218,38 +224,43 @@ export class DefaultContextCompactor implements ContextCompactor {
         this.charsPerToken = options.charsPerToken ?? options.profile?.charsPerToken ?? 4;
     }
 
-    compactHistory = async (options: CompactHistoryOptions): Promise<StructuredSummary | null> => {
-        if (options.signal?.aborted) {
+    private executeCompactorPrompt = async (
+        items: ModelItem[],
+        signal?: AbortSignal,
+    ): Promise<string | null> => {
+        if (signal?.aborted) {
             throw new DOMException("The operation was aborted.", "AbortError");
         }
 
-        // 1. Check persistent SQLite cache for existing summary covering this exact sequence range
-        if (this.store && options.sessionId) {
-            try {
-                const cached = await this.store.findContextSummary(
-                    options.sessionId,
-                    options.startSequence,
-                    options.endSequence,
-                );
-                if (cached) {
-                    const parsed = JSON.parse(cached.summaryJson);
-                    return validateStructuredSummary(
-                        parsed,
-                        this.maxSummaryTokens,
-                        this.charsPerToken,
-                    );
+        const request: ModelRequest = {
+            items,
+            tools: undefined, // Compactor strictly never passes tools or executes tools
+            signal,
+            profile: this.profile,
+        };
+
+        let responseText = "";
+        try {
+            for await (const event of this.provider.stream(request)) {
+                if (signal?.aborted) {
+                    throw new DOMException("The operation was aborted.", "AbortError");
                 }
-            } catch {
-                // If cache read or validation fails, proceed with compaction
+                if (event.type === "text") {
+                    responseText += event.content;
+                }
             }
+        } catch (error) {
+            if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+                throw error;
+            }
+            return null;
         }
 
-        if (options.signal?.aborted) {
-            throw new DOMException("The operation was aborted.", "AbortError");
-        }
+        return responseText;
+    };
 
-        // 2. Format items into bounded compaction input
-        const serializedHistory = options.items
+    private serializeHistoryItems = (items: readonly ModelItem[]): string =>
+        items
             .map((item) => {
                 if (item.type === "message") {
                     return `[${item.role}]: ${item.content}`;
@@ -269,95 +280,207 @@ export class DefaultContextCompactor implements ContextCompactor {
             .filter(Boolean)
             .join("\n\n");
 
-        const instructions =
-            "You are an AI context compactor for a software development assistant.\n" +
-            `Summarize the historical conversation turns (sequences ${options.startSequence} to ${options.endSequence}) into a concise, structured JSON object with this exact shape:\n` +
-            "{\n" +
-            '  "taskOrInvestigation": "Concise summary of the task or objective",\n' +
-            '  "importantFindings": ["Key architectural, structural, or code finding 1", "..."],\n' +
-            '  "filesAndLocations": ["path/to/file.ts", "..."],\n' +
-            '  "decisions": ["Architectural or implementation decision 1", "..."],\n' +
-            '  "failedApproaches": ["Approach tried that failed or was abandoned", "..."],\n' +
-            '  "unresolvedIssues": ["Open question or remaining issue", "..."],\n' +
-            '  "nextSteps": ["Immediate next recommended step", "..."],\n' +
-            '  "omissions": "Description of detailed source code listings, verbose logs, or tool results omitted"\n' +
-            "}\n\n" +
-            "Output strictly valid JSON. Do not include markdown code fences or explanatory text.";
+    private chunkHistoryItems = (
+        items: readonly ModelItem[],
+        maxTokensPerChunk: number,
+    ): ModelItem[][] => {
+        if (items.length === 0) {
+            return [];
+        }
 
-        const request: ModelRequest = {
-            items: [
-                {
-                    type: "message",
-                    role: "system",
-                    content: instructions,
-                },
-                {
-                    type: "message",
-                    role: "user",
-                    content: `--- CONVERSATION HISTORY TO SUMMARIZE ---\n${serializedHistory}`,
-                },
-            ],
-            tools: undefined, // Strictly disable tools: compactor never executes tools or enters tool loop
-            signal: options.signal,
-            profile: this.profile,
-        };
+        const chunks: ModelItem[][] = [];
+        let currentChunk: ModelItem[] = [];
+        let currentChunkTokens = 0;
 
-        let responseText = "";
-        try {
-            for await (const event of this.provider.stream(request)) {
-                if (options.signal?.aborted) {
-                    throw new DOMException("The operation was aborted.", "AbortError");
-                }
-                if (event.type === "text") {
-                    responseText += event.content;
-                }
+        for (const item of items) {
+            const itemTokens = estimateModelItemTokens(item, this.charsPerToken);
+            if (currentChunk.length > 0 && currentChunkTokens + itemTokens > maxTokensPerChunk) {
+                chunks.push(currentChunk);
+                currentChunk = [item];
+                currentChunkTokens = itemTokens;
+            } else {
+                currentChunk.push(item);
+                currentChunkTokens += itemTokens;
             }
-        } catch (error) {
-            if (
-                options.signal?.aborted ||
-                (error instanceof Error && error.name === "AbortError")
-            ) {
-                throw error;
-            }
-            return null;
         }
 
-        // 3. Extract and validate JSON response
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-            return null;
+        if (currentChunk.length > 0) {
+            chunks.push(currentChunk);
         }
 
-        let parsed: Record<string, unknown>;
-        try {
-            parsed = JSON.parse(jsonMatch[0]);
-        } catch {
-            return null;
+        return chunks;
+    };
+
+    compactHistory = async (options: CompactHistoryOptions): Promise<StructuredSummary | null> => {
+        if (options.signal?.aborted) {
+            throw new DOMException("The operation was aborted.", "AbortError");
         }
 
-        parsed.sourceRange = {
-            sessionId: options.sessionId,
-            startSequence: options.startSequence,
-            endSequence: options.endSequence,
-        };
+        // 1. Check persistent SQLite cache for existing summary covering this range or a reusable prefix
+        let previousSummary: StructuredSummary | null = null;
+        let candidateStartSequence = options.startSequence;
 
-        let summary: StructuredSummary;
-        try {
-            summary = validateStructuredSummary(parsed, this.maxSummaryTokens, this.charsPerToken);
-        } catch {
-            return null;
-        }
-
-        // 4. Persist validated summary to SQLite for future turns and sessions
         if (this.store && options.sessionId) {
             try {
-                const formattedItem = formatSummaryAsModelItem(summary);
+                const latestCached = await this.store.findLatestContextSummary(
+                    options.sessionId,
+                    options.startSequence,
+                    options.endSequence,
+                );
+                if (latestCached) {
+                    const parsed = JSON.parse(latestCached.summaryJson);
+                    const validated = validateStructuredSummary(
+                        parsed,
+                        this.maxSummaryTokens,
+                        this.charsPerToken,
+                    );
+                    if (latestCached.endSequence === options.endSequence) {
+                        return validated;
+                    }
+                    if (latestCached.endSequence < options.endSequence) {
+                        previousSummary = validated;
+                        candidateStartSequence = latestCached.endSequence + 1;
+                    }
+                }
+            } catch {
+                // If cache read or validation fails, proceed with compaction
+            }
+        }
+
+        if (options.signal?.aborted) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+        }
+
+        // 2. Identify items to summarize
+        let itemsToSummarize: readonly ModelItem[] = options.items;
+        if (previousSummary) {
+            if (options.turns) {
+                itemsToSummarize = options.turns
+                    .filter((t) => t.startSequence > previousSummary!.sourceRange.endSequence)
+                    .flatMap((t) => t.items);
+            } else if (options.items.length === options.endSequence - options.startSequence + 1) {
+                itemsToSummarize = options.items.slice(
+                    candidateStartSequence - options.startSequence,
+                );
+            }
+        }
+
+        // Calculate compactor capacity and reserve space for instructions and target output
+        const compactorCapacity = this.profile ? calculateMaxInputTokens(this.profile) : 8192;
+        const promptFramingReserved = this.maxSummaryTokens + 600;
+        const maxContentPerRequest = Math.max(400, compactorCapacity - promptFramingReserved);
+
+        const chunks = this.chunkHistoryItems(itemsToSummarize, maxContentPerRequest);
+
+        let currentSummary = previousSummary;
+
+        if (chunks.length === 0 && currentSummary) {
+            return currentSummary;
+        }
+
+        for (let chunkIdx = 0; chunkIdx < (chunks.length === 0 ? 1 : chunks.length); chunkIdx++) {
+            if (options.signal?.aborted) {
+                throw new DOMException("The operation was aborted.", "AbortError");
+            }
+
+            const chunkItems = chunks.length > 0 ? chunks[chunkIdx] : [];
+            const serializedChunk = this.serializeHistoryItems(chunkItems);
+
+            const instructions =
+                "You are an AI context compactor for a software development assistant.\n" +
+                `Summarize the historical conversation context (covering sequences ${options.startSequence} to ${options.endSequence}) into a concise, structured JSON object with this exact shape:\n` +
+                "{\n" +
+                '  "taskOrInvestigation": "Concise summary of the task or objective",\n' +
+                '  "importantFindings": ["Key architectural, structural, or code finding 1", "..."],\n' +
+                '  "filesAndLocations": ["path/to/file.ts", "..."],\n' +
+                '  "decisions": ["Architectural or implementation decision 1", "..."],\n' +
+                '  "failedApproaches": ["Approach tried that failed or was abandoned", "..."],\n' +
+                '  "unresolvedIssues": ["Open question or remaining issue", "..."],\n' +
+                '  "nextSteps": ["Immediate next recommended step", "..."],\n' +
+                '  "omissions": "Description of detailed source code listings, verbose logs, or tool results omitted"\n' +
+                "}\n\n" +
+                "Output strictly valid JSON. Do not include markdown code fences or explanatory text.";
+
+            let userContent = "";
+            if (currentSummary) {
+                userContent =
+                    `--- PREVIOUS VALIDATED CONTEXT SUMMARY (sequences ${currentSummary.sourceRange.startSequence} to ${currentSummary.sourceRange.endSequence}) ---\n` +
+                    JSON.stringify(currentSummary, null, 2) +
+                    `\n\n--- NEW CONVERSATION TURNS TO INCORPORATE ---\n${serializedChunk}`;
+            } else {
+                userContent = `--- CONVERSATION HISTORY TO SUMMARIZE ---\n${serializedChunk}`;
+            }
+
+            const responseText = await this.executeCompactorPrompt(
+                [
+                    { type: "message", role: "system", content: instructions },
+                    { type: "message", role: "user", content: userContent },
+                ],
+                options.signal,
+            );
+
+            if (!responseText) {
+                return null;
+            }
+
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+                return null;
+            }
+
+            let parsed: Record<string, unknown>;
+            try {
+                parsed = JSON.parse(jsonMatch[0]);
+            } catch {
+                return null;
+            }
+
+            parsed.sourceRange = {
+                sessionId: options.sessionId,
+                startSequence: options.startSequence,
+                endSequence:
+                    chunkIdx === chunks.length - 1
+                        ? options.endSequence
+                        : candidateStartSequence + chunkIdx,
+            };
+
+            let validatedChunkSummary: StructuredSummary;
+            try {
+                validatedChunkSummary = validateStructuredSummary(
+                    parsed,
+                    this.maxSummaryTokens,
+                    this.charsPerToken,
+                );
+            } catch {
+                return null;
+            }
+
+            currentSummary = validatedChunkSummary;
+        }
+
+        if (!currentSummary) {
+            return null;
+        }
+
+        const finalSummary: StructuredSummary = {
+            ...currentSummary,
+            sourceRange: {
+                sessionId: options.sessionId,
+                startSequence: options.startSequence,
+                endSequence: options.endSequence,
+            },
+        };
+
+        // Persist validated summary to SQLite (and automatically prune superseded prefix summaries)
+        if (this.store && options.sessionId) {
+            try {
+                const formattedItem = formatSummaryAsModelItem(finalSummary);
                 const estimatedTokens = estimateModelItemTokens(formattedItem, this.charsPerToken);
                 await this.store.saveContextSummary({
                     sessionId: options.sessionId,
                     startSequence: options.startSequence,
                     endSequence: options.endSequence,
-                    summaryJson: JSON.stringify(summary),
+                    summaryJson: JSON.stringify(finalSummary),
                     estimatedTokens,
                 });
             } catch {
@@ -365,7 +488,7 @@ export class DefaultContextCompactor implements ContextCompactor {
             }
         }
 
-        return summary;
+        return finalSummary;
     };
 
     compactToolResult = async (options: CompactToolResultOptions): Promise<string | null> => {
@@ -373,64 +496,109 @@ export class DefaultContextCompactor implements ContextCompactor {
             throw new DOMException("The operation was aborted.", "AbortError");
         }
 
-        const maxContentChars = options.targetTokens * this.charsPerToken;
-        const boundedSnippet =
-            options.content.length > maxContentChars * 4
-                ? options.content.slice(0, maxContentChars * 4) +
-                  "\n...[Remainder truncated before compaction]"
-                : options.content;
+        const makeFormatted = (body: string) =>
+            `[Summary of ${options.toolName} (${options.callId})]:\n` +
+            `${body}\n\n` +
+            `[Canonical transcript retains full original output (${options.content.length} characters). Details omitted for token budget.]`;
 
-        const promptText =
-            `Summarize the following output from tool "${options.toolName}" (call ID: "${options.callId}") concisely within ${options.targetTokens} tokens.\n` +
-            `Preserve file paths, line numbers, errors, match counts, and structural findings.\n` +
-            `Explicitly state what information was omitted.\n\n` +
-            `Output:\n${boundedSnippet}`;
+        const framingOverhead = estimateTokens(makeFormatted(""), this.charsPerToken) + 4;
+        const targetBodyTokens = options.targetTokens - framingOverhead;
 
-        const request: ModelRequest = {
-            items: [
-                {
-                    type: "message",
-                    role: "user",
-                    content: promptText,
-                },
-            ],
-            tools: undefined,
-            signal: options.signal,
-            profile: this.profile,
-        };
+        if (targetBodyTokens < 8) {
+            return null;
+        }
 
-        let responseText = "";
-        try {
-            for await (const event of this.provider.stream(request)) {
+        const compactorCapacity = this.profile ? calculateMaxInputTokens(this.profile) : 8192;
+        const promptOverhead = 350 + targetBodyTokens;
+        const maxToolChunkTokens = Math.max(400, compactorCapacity - promptOverhead);
+
+        const contentTokens = estimateTokens(options.content, this.charsPerToken);
+
+        let summaryBody: string | null = null;
+
+        if (contentTokens <= maxToolChunkTokens) {
+            const promptText =
+                `Summarize the following output from tool "${options.toolName}" (call ID: "${options.callId}") concisely within ${targetBodyTokens} tokens.\n` +
+                `Preserve all key metadata: tool name, call ID, file paths, line numbers, exit codes, errors, status, and structural findings.\n` +
+                `Explicitly include an omission note stating what information, verbose logs, or details were omitted.\n\n` +
+                `Output:\n${options.content}`;
+
+            const response = await this.executeCompactorPrompt(
+                [{ type: "message", role: "user", content: promptText }],
+                options.signal,
+            );
+
+            if (!response) {
+                return null;
+            }
+            summaryBody = response.trim();
+        } else {
+            // Stage/chunk huge tool output line by line without destructive pre-slicing
+            const lines = options.content.split("\n");
+            const chunks: string[] = [];
+            let currentLines: string[] = [];
+            let currentTokens = 0;
+
+            for (const line of lines) {
+                const lineTokens = estimateTokens(line, this.charsPerToken) + 1;
+                if (currentLines.length > 0 && currentTokens + lineTokens > maxToolChunkTokens) {
+                    chunks.push(currentLines.join("\n"));
+                    currentLines = [line];
+                    currentTokens = lineTokens;
+                } else {
+                    currentLines.push(line);
+                    currentTokens += lineTokens;
+                }
+            }
+            if (currentLines.length > 0) {
+                chunks.push(currentLines.join("\n"));
+            }
+
+            const partialSummaries: string[] = [];
+            for (let i = 0; i < chunks.length; i++) {
                 if (options.signal?.aborted) {
                     throw new DOMException("The operation was aborted.", "AbortError");
                 }
-                if (event.type === "text") {
-                    responseText += event.content;
+                const chunkPrompt = `Extract key findings, file paths, line numbers, error messages, and omissions from part ${i + 1}/${chunks.length} of tool "${options.toolName}" output within ${Math.max(30, Math.floor(targetBodyTokens / chunks.length))} tokens:\n\n${chunks[i]}`;
+
+                const partial = await this.executeCompactorPrompt(
+                    [{ type: "message", role: "user", content: chunkPrompt }],
+                    options.signal,
+                );
+                if (partial) {
+                    partialSummaries.push(partial.trim());
                 }
             }
-        } catch (error) {
-            if (
-                options.signal?.aborted ||
-                (error instanceof Error && error.name === "AbortError")
-            ) {
-                throw error;
+
+            if (partialSummaries.length === 0) {
+                return null;
             }
+
+            const mergePrompt =
+                `Consolidate the following partial summaries for tool "${options.toolName}" (call ID: "${options.callId}") into a single concise summary within ${targetBodyTokens} tokens.\n` +
+                `Preserve file paths, line numbers, error codes, and explicit omissions.\n\n` +
+                partialSummaries.join("\n\n");
+
+            const merged = await this.executeCompactorPrompt(
+                [{ type: "message", role: "user", content: mergePrompt }],
+                options.signal,
+            );
+
+            if (!merged) {
+                return null;
+            }
+            summaryBody = merged.trim();
+        }
+
+        if (!summaryBody || summaryBody.length === 0) {
             return null;
         }
 
-        const trimmed = responseText.trim();
-        if (trimmed.length === 0) {
-            return null;
-        }
+        const formatted = makeFormatted(summaryBody);
+        const totalEstimated = estimateTokens(formatted, this.charsPerToken) + 4;
 
-        const formatted =
-            `[Summary of ${options.toolName} (${options.callId})]:\n` +
-            `${trimmed}\n\n` +
-            `[Canonical transcript retains full original output (${options.content.length} characters). Details omitted for token budget.]`;
-
-        const tokens = estimateTokens(formatted, this.charsPerToken) + 4;
-        if (tokens > options.targetTokens * 1.5) {
+        // Strict size enforcement: MUST fit within targetTokens (zero 1.5x tolerance!)
+        if (totalEstimated > options.targetTokens) {
             return null;
         }
 

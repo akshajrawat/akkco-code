@@ -25,6 +25,8 @@ export const createCliController = ({
     persistence,
     sessionId,
     profile,
+    compactor,
+    budget,
 }: CliControllerOptions) => {
     let state: CliViewState = {
         history: [],
@@ -107,6 +109,8 @@ export const createCliController = ({
                     },
                 },
                 reliabilityOptions,
+                budget,
+                compactor,
             ),
             [],
             {

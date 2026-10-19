@@ -452,7 +452,7 @@ test("sessionPersistence: context trimming during request preparation leaves can
     await store.close();
 });
 
-test("sessionPersistence: truncating tool-result envelope for model does not mutate canonical tool execution in transcript or SQLite", async () => {
+test("sessionPersistence: compacting tool-result for model does not mutate canonical tool execution in transcript or SQLite", async () => {
     const store = new SqliteConversationStore({ dbPath: ":memory:" });
     await store.initialize();
     const orchestrator = new ConversationMemoryOrchestrator(store);
@@ -497,7 +497,19 @@ test("sessionPersistence: truncating tool-result envelope for model does not mut
         execute: async () => ({ content: largeToolResult }),
     };
 
-    const runtime = createAkkcoRuntime(boundedProvider, toolHost);
+    const compactor = {
+        compactHistory: async () => null,
+        compactToolResult: async ({ toolName, callId, targetTokens }: any) =>
+            `[Summary of ${toolName} (${callId})]: Compacted payload within ${targetTokens} tokens.\n\n[Canonical transcript retains full original output]`,
+    };
+
+    const runtime = createAkkcoRuntime(
+        boundedProvider,
+        toolHost,
+        undefined,
+        undefined,
+        compactor as any,
+    );
 
     // Context budget: contextWindowTokens = 220, maxOutputTokens = 40, safetyMarginTokens = 20 -> maxInput = 160 tokens
     const profile: ModelProfile = {
@@ -520,16 +532,16 @@ test("sessionPersistence: truncating tool-result envelope for model does not mut
 
     assert.equal(capturedRequests.length, 2);
 
-    // Check request 2 received by provider: tool_result content MUST be truncated
+    // Check request 2 received by provider: tool_result content MUST be compacted
     const req2ToolResult = capturedRequests[1].items.find((it) => it.type === "tool_result") as any;
     assert.ok(req2ToolResult, "Must have tool_result item in model request");
     assert.ok(
         req2ToolResult.content.length < largeToolResult.length,
-        "Model request projection must have truncated tool result",
+        "Model request projection must have compacted tool result",
     );
     assert.ok(
-        req2ToolResult.content.includes("[Output truncated"),
-        "Must contain truncation notice in model projection",
+        req2ToolResult.content.includes("[Summary of fetch_data"),
+        "Must contain summary in model projection",
     );
 
     // But canonical session transcript MUST retain the FULL untruncated result:

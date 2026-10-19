@@ -25,6 +25,11 @@ export interface ContextBudget {
      * Dynamic ceiling (not a fixed quota) reserved for repository evidence (Task 2).
      */
     maximumRepositoryTokens?: number;
+
+    /**
+     * Explicit flag indicating maximumMemoryTokens is an enforceable hard ceiling rather than a default soft target.
+     */
+    isHardMemoryLimit?: boolean;
 }
 
 export const DEFAULT_CONTEXT_BUDGET: ContextBudget = {
@@ -33,6 +38,7 @@ export const DEFAULT_CONTEXT_BUDGET: ContextBudget = {
     minimumRecentHistoryTokens: 1536,
     maximumMemoryTokens: 2048,
     maximumRepositoryTokens: 2048,
+    isHardMemoryLimit: false,
 };
 
 /**
@@ -163,12 +169,16 @@ export const deriveContextBudget = (
     const maximumRepositoryTokens =
         overrides?.maximumRepositoryTokens ?? Math.floor(maxInputTokens * 0.3);
 
+    const isHardMemoryLimit =
+        overrides?.isHardMemoryLimit ?? overrides?.maximumMemoryTokens !== undefined;
+
     const budget: ContextBudget = {
         preferredInputTokens: overrides?.preferredInputTokens ?? maxInputTokens,
         reservedOverheadTokens,
         minimumRecentHistoryTokens,
         maximumMemoryTokens,
         maximumRepositoryTokens,
+        isHardMemoryLimit,
     };
 
     validateContextBudget(budget);

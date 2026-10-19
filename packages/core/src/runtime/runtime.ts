@@ -7,8 +7,9 @@ import type {
     ModelToolCallEvent,
     ModelToolResult,
 } from "@akkco/models";
-import { type ContextBudget, DEFAULT_CONTEXT_BUDGET } from "../context/budget.js";
-import { prepareBoundedModelRequest } from "../context/request-preparer.js";
+import { calculateMaxInputTokens, type ContextBudget } from "../context/budget.js";
+import type { ContextCompactor } from "../context/context-compactor.js";
+import { estimateModelItemTokens, estimateTokens } from "../context/token-estimator.js";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
 import {
     AgentLoopError,
@@ -30,18 +31,52 @@ const throwIfAborted = (signal?: AbortSignal) => {
     }
 };
 
+export interface AkkcoRuntimeOptions {
+    readonly toolHost?: RuntimeToolHost;
+    readonly reliabilityOptions?: RuntimeReliabilityOptions;
+    readonly budget?: ContextBudget;
+    readonly compactor?: ContextCompactor;
+    readonly maxToolOutputTokens?: number;
+}
+
 /**
  * Core agent runtime coordinating the multi-turn model-tool execution loop
  * while enforcing reliability controls and cycle detection.
  */
 export const createAkkcoRuntime = (
     provider: ModelProvider,
-    toolHost?: RuntimeToolHost,
+    toolHostOrOptions?: RuntimeToolHost | AkkcoRuntimeOptions,
     reliabilityOptions?: RuntimeReliabilityOptions,
     budget?: ContextBudget,
+    compactor?: ContextCompactor,
+    maxToolOutputTokens?: number,
 ) => {
+    const isOptionsObject =
+        toolHostOrOptions !== undefined &&
+        typeof (toolHostOrOptions as any)?.execute !== "function" &&
+        ("toolHost" in toolHostOrOptions ||
+            "reliabilityOptions" in toolHostOrOptions ||
+            "budget" in toolHostOrOptions ||
+            "compactor" in toolHostOrOptions ||
+            "maxToolOutputTokens" in toolHostOrOptions);
+
+    const options: AkkcoRuntimeOptions = isOptionsObject
+        ? (toolHostOrOptions as AkkcoRuntimeOptions)
+        : {
+              toolHost: toolHostOrOptions as RuntimeToolHost | undefined,
+              reliabilityOptions,
+              budget,
+              compactor,
+              maxToolOutputTokens,
+          };
+
+    const toolHost = options.toolHost;
+    const effectiveBudget = options.budget;
+    const effectiveCompactor = options.compactor;
+    const effectiveMaxToolOutputTokens = options.maxToolOutputTokens;
+
     const { maxToolIterations, repeatedToolCallLimit, consecutiveToolErrorLimit } =
-        validateReliabilityOptions(reliabilityOptions);
+        validateReliabilityOptions(options.reliabilityOptions);
 
     const run = (request: ModelRequest) => {
         return {
@@ -57,8 +92,6 @@ export const createAkkcoRuntime = (
                 let cycleWarned = false;
                 let warnedCallSignature: string | undefined;
 
-                const isCompatProvider = provider.id.endsWith("-compatibility");
-
                 while (true) {
                     throwIfAborted(request.signal);
 
@@ -69,18 +102,10 @@ export const createAkkcoRuntime = (
                         profile: request.profile,
                     };
 
-                    const outgoingRequest: ModelRequest = isCompatProvider
-                        ? effectiveRequest
-                        : prepareBoundedModelRequest({
-                              request: effectiveRequest,
-                              budget,
-                              profile: request.profile,
-                          });
-
                     let turnAssistantText = "";
                     const toolCallEvents: ModelToolCallEvent[] = [];
 
-                    for await (const event of provider.stream(outgoingRequest)) {
+                    for await (const event of provider.stream(effectiveRequest)) {
                         throwIfAborted(request.signal);
                         if (event.type === "text") {
                             turnAssistantText += event.content;
@@ -264,10 +289,61 @@ export const createAkkcoRuntime = (
 
                             consecutiveToolErrors = 0;
 
+                            let toolContentForWorkingItems = result.content;
+                            if (effectiveCompactor) {
+                                const charsPerToken = request.profile?.charsPerToken ?? 4;
+                                const authorCapacity = request.profile
+                                    ? calculateMaxInputTokens(request.profile)
+                                    : (effectiveBudget?.preferredInputTokens ?? 8192);
+                                const overhead = effectiveBudget?.reservedOverheadTokens ?? 0;
+                                const existingTokens = workingItems.reduce(
+                                    (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
+                                    0,
+                                );
+                                const availableForTool = Math.max(
+                                    64,
+                                    authorCapacity - overhead - existingTokens,
+                                );
+                                const targetToolBudget =
+                                    effectiveMaxToolOutputTokens !== undefined
+                                        ? Math.min(availableForTool, effectiveMaxToolOutputTokens)
+                                        : Math.min(
+                                              availableForTool,
+                                              Math.floor(authorCapacity * 0.3),
+                                          );
+
+                                if (
+                                    estimateTokens(result.content, charsPerToken) > targetToolBudget
+                                ) {
+                                    try {
+                                        const compacted =
+                                            await effectiveCompactor.compactToolResult({
+                                                toolName: call.name,
+                                                callId: call.id,
+                                                content: result.content,
+                                                targetTokens: targetToolBudget,
+                                                signal: request.signal,
+                                            });
+                                        if (compacted) {
+                                            toolContentForWorkingItems = compacted;
+                                        }
+                                    } catch (compactionErr) {
+                                        if (
+                                            request.signal?.aborted ||
+                                            (compactionErr instanceof Error &&
+                                                compactionErr.name === "AbortError")
+                                        ) {
+                                            throw compactionErr;
+                                        }
+                                        // On compaction error, retain original content and allow downstream preflight to fail closed
+                                    }
+                                }
+                            }
+
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",
                                 callId: call.id,
-                                content: result.content,
+                                content: toolContentForWorkingItems,
                             };
                             workingItems.push(resultItem);
 

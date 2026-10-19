@@ -84,6 +84,7 @@ export class Session {
                               transcript: internalTranscript,
                               signal,
                               sessionId: self.id,
+                              profile: self.profile,
                           })
                         : compileContext(internalTranscript);
 

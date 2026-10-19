@@ -1,4 +1,6 @@
 import type {
+    ContextBudget,
+    ContextCompactor,
     ContextCompiler,
     RuntimeReliabilityOptions,
     RuntimeToolExecutionEvent,
@@ -17,6 +19,8 @@ export interface CliControllerOptions {
     persistence?: SessionPersistence;
     sessionId?: string;
     profile?: ModelProfile;
+    compactor?: ContextCompactor;
+    budget?: ContextBudget;
 }
 
 export type NoticeKind = "info" | "error" | "warning";

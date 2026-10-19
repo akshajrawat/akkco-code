@@ -90,6 +90,11 @@ export interface ConversationStore {
         startSequence: number,
         endSequence: number,
     ): Promise<StoredContextSummary | null>;
+    findLatestContextSummary(
+        sessionId: string,
+        startSequence: number,
+        maxEndSequence: number,
+    ): Promise<StoredContextSummary | null>;
 }
 
 export interface StoredContextSummary {

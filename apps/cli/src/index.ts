@@ -162,6 +162,7 @@ const main = async () => {
     });
     const compiler = createBoundedContextCompiler({
         budget: contextBudget,
+        profile: effectiveProfile,
         memoryRetriever: retriever,
         compactor,
         sessionId,
@@ -175,6 +176,8 @@ const main = async () => {
         persistence: orchestrator,
         sessionId,
         profile: effectiveProfile,
+        compactor,
+        budget: contextBudget,
     });
 
     const manifest = JSON.parse(

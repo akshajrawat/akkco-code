@@ -480,8 +480,9 @@ test("BoundedContextCompiler 16 & 50-turn Session test: 50-turn Session transcri
     );
 });
 
-test("F-002: Request preparation bounds subsequent tool-loop requests after large tool output", async () => {
-    const { prepareBoundedModelRequest } = await import("../src/index.js");
+test("F-002: Request preparation fails closed when uncompacted tool output exceeds budget or maxToolOutputTokens", async () => {
+    const { prepareBoundedModelRequest, ContextBudgetOverflowError } =
+        await import("../src/index.js");
 
     const hugeToolOutput = "x".repeat(100_000); // 25,000 estimated tokens
 
@@ -514,16 +515,15 @@ test("F-002: Request preparation bounds subsequent tool-loop requests after larg
         minimumRecentHistoryTokens: 1000,
     };
 
-    const prepared = prepareBoundedModelRequest({
-        request,
-        budget,
-        maxToolOutputTokens: 1000,
-    });
-
-    const toolResult = prepared.items.find((it) => it.type === "tool_result") as any;
-    assert.ok(toolResult);
-    assert.ok(toolResult.content.includes("[Output truncated: exceeded token budget limit"));
-    assert.ok(toolResult.content.length < 5000);
+    assert.throws(
+        () =>
+            prepareBoundedModelRequest({
+                request,
+                budget,
+                maxToolOutputTokens: 1000,
+            }),
+        ContextBudgetOverflowError,
+    );
     // Ensure the original request items were not mutated
     assert.equal(request.items[4].content.length, 100_000);
 });
@@ -736,7 +736,7 @@ test("Regression 1: Mandatory input fits, but current-turn content exceeds total
     );
 });
 
-test("Regression 2: Multiple tool results are individually bounded but collectively exceed the budget", async () => {
+test("Regression 2: Multiple tool results that collectively exceed the budget fail closed with ContextBudgetOverflowError", async () => {
     const toolResult1 = "1".repeat(2400); // ~604 tokens
     const toolResult2 = "2".repeat(2400); // ~604 tokens
     const toolResult3 = "3".repeat(2400); // ~604 tokens
@@ -760,29 +760,18 @@ test("Regression 2: Multiple tool results are individually bounded but collectiv
         minimumRecentHistoryTokens: 100,
     };
 
-    const prepared = prepareBoundedModelRequest({
-        request,
-        budget,
-        maxToolOutputTokens: 800,
-    });
-
-    const results = prepared.items.filter((it) => it.type === "tool_result");
-    assert.equal(results.length, 3);
-    for (const r of results) {
-        assert.ok((r as any).content.includes("[Output truncated:"));
-    }
-    const totalTokens = estimateRequestTokens(
-        prepared.items,
-        undefined,
-        budget.reservedOverheadTokens,
-    );
-    assert.ok(
-        totalTokens <= budget.preferredInputTokens,
-        `Total tokens ${totalTokens} should be <= ${budget.preferredInputTokens}`,
+    assert.throws(
+        () =>
+            prepareBoundedModelRequest({
+                request,
+                budget,
+                maxToolOutputTokens: 800,
+            }),
+        ContextBudgetOverflowError,
     );
 });
 
-test("Regression 3: Truncation notice causes an otherwise bounded result to overflow - strictly bounded", async () => {
+test("Regression 3: Tool result exceeding maxToolOutputTokens fails closed with ContextBudgetOverflowError", async () => {
     const hugeResult = "Z".repeat(10000);
     const request: ModelRequest = {
         items: [
@@ -798,20 +787,15 @@ test("Regression 3: Truncation notice causes an otherwise bounded result to over
         minimumRecentHistoryTokens: 200,
     };
 
-    const prepared = prepareBoundedModelRequest({
-        request,
-        budget,
-        maxToolOutputTokens: 300,
-    });
-
-    const truncatedItem = prepared.items.find((it) => it.type === "tool_result") as any;
-    assert.ok(truncatedItem);
-    const estimatedItemTokens = estimateModelItemTokens(truncatedItem);
-    assert.ok(
-        estimatedItemTokens <= 300,
-        `Expected truncated item tokens (${estimatedItemTokens}) to be <= maxToolOutputTokens (300)`,
+    assert.throws(
+        () =>
+            prepareBoundedModelRequest({
+                request,
+                budget,
+                maxToolOutputTokens: 300,
+            }),
+        ContextBudgetOverflowError,
     );
-    assert.ok(truncatedItem.content.includes("[Output truncated:"));
 });
 
 test("Regression 4: A tool call and result straddle a historical selection boundary", async () => {
@@ -1020,7 +1004,7 @@ test("Regression 9: Valid prepared requests satisfy the documented estimator bud
             { type: "message", role: "assistant", content: "Turn 1 answer" },
             { type: "message", role: "user", content: "Turn 2 question" },
             { type: "tool_call", id: "c1", name: "search", arguments: { q: "foo" } },
-            { type: "tool_result", callId: "c1", content: "Search result content ".repeat(100) },
+            { type: "tool_result", callId: "c1", content: "Search result content ".repeat(10) },
         ],
         tools: [
             {
@@ -1054,8 +1038,8 @@ test("Regression 9: Valid prepared requests satisfy the documented estimator bud
     );
 });
 
-test("Regression 10: Original request and transcript items remain unchanged (immutability)", async () => {
-    const originalContent = "Original massive output ".repeat(500);
+test("Regression 10: Original request items remain unchanged (immutability)", async () => {
+    const originalContent = "Original output ".repeat(15);
     const originalItem: ModelToolResult = {
         type: "tool_result",
         callId: "c1",
@@ -1064,30 +1048,28 @@ test("Regression 10: Original request and transcript items remain unchanged (imm
     const request: ModelRequest = {
         items: [
             { type: "message", role: "system", content: "Policy" },
-            { type: "message", role: "user", content: "Prompt" },
+            { type: "message", role: "user", content: "Older question ".repeat(20) },
+            { type: "message", role: "assistant", content: "Older reply ".repeat(20) },
+            { type: "message", role: "user", content: "Current prompt" },
             { type: "tool_call", id: "c1", name: "tool", arguments: {} },
             originalItem,
         ],
     };
 
     const budget: ContextBudget = {
-        preferredInputTokens: 500,
+        preferredInputTokens: 160,
         reservedOverheadTokens: 50,
-        minimumRecentHistoryTokens: 50,
+        minimumRecentHistoryTokens: 20,
     };
 
     const prepared = prepareBoundedModelRequest({
         request,
         budget,
-        maxToolOutputTokens: 100,
     });
 
     assert.equal(originalItem.content, originalContent);
-    assert.equal(request.items[3], originalItem);
-
-    const preparedResult = prepared.items[3] as ModelToolResult;
-    assert.notEqual(preparedResult, originalItem);
-    assert.ok(preparedResult.content.length < originalContent.length);
+    assert.equal(request.items[5], originalItem);
+    assert.ok(prepared.items.length < request.items.length);
 });
 
 test("Regression 11: Budget validation rejects invalid numbers and empty requests do not bypass", () => {
@@ -1276,7 +1258,19 @@ test("Regression 12: Multi-iteration tool loop via AkkcoRuntime continuously bou
         minimumRecentHistoryTokens: 100,
     };
 
-    const runtime = createAkkcoRuntime(mockProvider as any, mockToolHost as any, undefined, budget);
+    const compactor = {
+        compactHistory: async () => null,
+        compactToolResult: async ({ toolName, callId, targetTokens }: any) =>
+            `[Summary of ${toolName} (${callId})]: Compacted to ${targetTokens} tokens.`,
+    };
+
+    const runtime = createAkkcoRuntime(
+        mockProvider as any,
+        mockToolHost as any,
+        undefined,
+        budget,
+        compactor as any,
+    );
 
     const events: any[] = [];
     for await (const ev of runtime.run({

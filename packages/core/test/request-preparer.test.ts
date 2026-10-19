@@ -154,7 +154,7 @@ test("Core Budgeting: active user prompt and mandatory policy are never discarde
     assert.strictEqual(activeItem.content, "Crucial active prompt that must survive");
 });
 
-test("Core Budgeting: safe tool-result truncation for native and compatibility results", () => {
+test("Core Budgeting: fails closed with ContextBudgetOverflowError for uncompacted oversized active tool results", () => {
     const profile: ModelProfile = {
         id: "truncate-profile",
         contextWindowTokens: 300,
@@ -186,15 +186,13 @@ test("Core Budgeting: safe tool-result truncation for native and compatibility r
         },
     ];
 
-    const prepared = prepareBoundedModelRequest({
-        request: { items, profile },
-    });
-
-    const lastItem = prepared.items[prepared.items.length - 1];
-    assert.strictEqual(lastItem.type, "message");
-    assert.ok(lastItem.content.includes('<akkco_tool_result call_id="c123" status="success">'));
-    assert.ok(lastItem.content.includes("</akkco_tool_result>"));
-    assert.ok(lastItem.content.includes("[Output truncated"));
+    assert.throws(
+        () =>
+            prepareBoundedModelRequest({
+                request: { items, profile },
+            }),
+        ContextBudgetOverflowError,
+    );
 });
 
 test("Core Budgeting: fails closed with ContextBudgetOverflowError reporting details", () => {

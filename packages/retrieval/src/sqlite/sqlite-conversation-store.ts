@@ -430,6 +430,9 @@ export class SqliteConversationStore implements ConversationStore {
 
         await this.saveSession({ id: summary.sessionId });
 
+        const estimatedTokens =
+            summary.estimatedTokens ?? Math.ceil(summary.summaryJson.length / 4);
+
         await executeWithRetry(() => {
             const stmt = db.prepare(`
                 INSERT INTO context_summaries (
@@ -448,9 +451,16 @@ export class SqliteConversationStore implements ConversationStore {
                 summary.startSequence,
                 summary.endSequence,
                 summary.summaryJson,
-                summary.estimatedTokens,
+                estimatedTokens,
                 createdAt,
             );
+
+            // Prune superseded prefix summaries for the same session and start sequence
+            const pruneStmt = db.prepare(`
+                DELETE FROM context_summaries
+                WHERE session_id = ? AND start_sequence = ? AND end_sequence < ?;
+            `);
+            pruneStmt.run(summary.sessionId, summary.startSequence, summary.endSequence);
         });
     };
 
@@ -497,6 +507,47 @@ export class SqliteConversationStore implements ConversationStore {
                  WHERE session_id = ? AND start_sequence = ? AND end_sequence = ?`,
             )
             .get(sessionId, startSequence, endSequence) as
+            | {
+                  id: string;
+                  session_id: string;
+                  start_sequence: number;
+                  end_sequence: number;
+                  summary_json: string;
+                  estimated_tokens: number;
+                  created_at: string;
+              }
+            | undefined;
+
+        if (!row) {
+            return null;
+        }
+
+        return {
+            id: row.id,
+            sessionId: row.session_id,
+            startSequence: row.start_sequence,
+            endSequence: row.end_sequence,
+            summaryJson: row.summary_json,
+            estimatedTokens: row.estimated_tokens,
+            createdAt: row.created_at,
+        };
+    };
+
+    findLatestContextSummary = async (
+        sessionId: string,
+        startSequence: number,
+        maxEndSequence: number,
+    ): Promise<StoredContextSummary | null> => {
+        const db = this.getDb();
+        const row = db
+            .prepare(
+                `SELECT id, session_id, start_sequence, end_sequence, summary_json, estimated_tokens, created_at
+                 FROM context_summaries
+                 WHERE session_id = ? AND start_sequence = ? AND end_sequence <= ?
+                 ORDER BY end_sequence DESC
+                 LIMIT 1`,
+            )
+            .get(sessionId, startSequence, maxEndSequence) as
             | {
                   id: string;
                   session_id: string;
