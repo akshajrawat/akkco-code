@@ -43,8 +43,8 @@ export class TextToolCompatibilityProvider implements ModelProvider {
     readonly id: string;
 
     constructor(
-        private readonly provider: ModelProvider,
-        private readonly options?: TextToolCompatibilityProviderOptions,
+        readonly provider: ModelProvider,
+        readonly options?: TextToolCompatibilityProviderOptions,
     ) {
         this.id = `${provider.id}-compatibility`;
     }

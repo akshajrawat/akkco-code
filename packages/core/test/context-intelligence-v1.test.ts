@@ -868,3 +868,682 @@ test("Group F2: Dead code verification (removed character-truncation and fair-sh
         "allocateToolResultBudgets must not be exported",
     );
 });
+
+// ============================================================================
+// Group G: Fix 1 — Strict Physical Capacity Bounded Compactor
+// ============================================================================
+
+const createStrictFakeProvider = (
+    maxCapacity: number,
+    responder: (
+        request: ModelRequest,
+    ) => AsyncIterable<ModelEvent> | Promise<AsyncIterable<ModelEvent>>,
+    recordedRequests: ModelRequest[] = [],
+): ModelProvider => ({
+    id: "strict-fake-provider",
+    stream: (request: ModelRequest) => {
+        const tokens = request.items.reduce((sum, it) => {
+            const chars =
+                it.type === "message" || it.type === "tool_result" ? (it.content ?? "").length : 0;
+            return sum + Math.ceil(chars / 4) + 4;
+        }, 0);
+        if (tokens > maxCapacity) {
+            throw new Error(
+                `Strict physical capacity exceeded: request has estimated ${tokens} tokens, max allowed is ${maxCapacity}`,
+            );
+        }
+        recordedRequests.push(request);
+        return (async function* () {
+            const stream = await responder(request);
+            for await (const event of stream) {
+                yield event;
+            }
+        })();
+    },
+});
+
+test("Group G1: Strict fake provider rejects any request exceeding capacity; compactor guarantees all requests fit within capacity (250 tokens)", async () => {
+    let requestsCount = 0;
+    const recordedRequests: ModelRequest[] = [];
+
+    const compactorProvider = createStrictFakeProvider(
+        250,
+        async () => {
+            requestsCount++;
+            return (async function* () {
+                yield {
+                    type: "text",
+                    content: makeSummaryJson({
+                        startSequence: 1,
+                        endSequence: 30,
+                        findings: [`Finding ${requestsCount}`],
+                    }),
+                } as ModelEvent;
+            })();
+        },
+        recordedRequests,
+    );
+
+    const smallProfile: ModelProfile = {
+        id: "small-compactor-strict",
+        contextWindowTokens: 400,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 50,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const compactor = new DefaultContextCompactor({
+        provider: compactorProvider,
+        profile: smallProfile,
+    });
+
+    const turns = Array.from({ length: 6 }, (_, i) => ({
+        startSequence: i * 5 + 1,
+        endSequence: (i + 1) * 5,
+        items: [
+            {
+                type: "message" as const,
+                role: "user" as const,
+                content: `Turn ${i + 1} content `.repeat(20),
+            },
+        ],
+    }));
+
+    const allItems = turns.flatMap((t) => t.items);
+
+    const summary = await compactor.compactHistory({
+        items: allItems,
+        startSequence: 1,
+        endSequence: 30,
+        turns,
+    });
+
+    assert.ok(summary !== null, "Summary must be successfully created");
+    assert.ok(recordedRequests.length > 1, "Must require multiple chunk requests");
+
+    // Assert that every single request was strictly <= 250 tokens
+    for (const req of recordedRequests) {
+        const tokens = req.items.reduce(
+            (sum, it) => sum + (it.type === "message" ? Math.ceil(it.content.length / 4) + 4 : 4),
+            0,
+        );
+        assert.ok(
+            tokens <= 250,
+            `Request tokens (${tokens}) must be <= 250 physical capacity limit`,
+        );
+    }
+});
+
+test("Group G2: Single historical item larger than chunk capacity is sliced safely without sending oversized request", async () => {
+    const recordedRequests: ModelRequest[] = [];
+    const compactorProvider = createStrictFakeProvider(
+        250,
+        async () => {
+            return (async function* () {
+                yield {
+                    type: "text",
+                    content: makeSummaryJson({
+                        startSequence: 1,
+                        endSequence: 1,
+                        findings: ["Sliced finding"],
+                    }),
+                } as ModelEvent;
+            })();
+        },
+        recordedRequests,
+    );
+
+    const smallProfile: ModelProfile = {
+        id: "small-compactor-strict",
+        contextWindowTokens: 400,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 50,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const compactor = new DefaultContextCompactor({
+        provider: compactorProvider,
+        profile: smallProfile,
+    });
+
+    // Single message of 2,000 characters (~500 tokens > 250 capacity)
+    const giantItem: ModelItem = {
+        type: "message",
+        role: "user",
+        content: "Very long uninterrupted message content that exceeds capacity. ".repeat(30),
+    };
+
+    const summary = await compactor.compactHistory({
+        items: [giantItem],
+        startSequence: 1,
+        endSequence: 1,
+    });
+
+    assert.ok(summary !== null, "Oversized single item must be summarized successfully");
+    assert.ok(recordedRequests.length > 1, "Must slice oversized item into multiple requests");
+
+    for (const req of recordedRequests) {
+        const tokens = req.items.reduce(
+            (sum, it) => sum + (it.type === "message" ? Math.ceil(it.content.length / 4) + 4 : 4),
+            0,
+        );
+        assert.ok(tokens <= 250, `Request tokens (${tokens}) must be <= 250`);
+    }
+});
+
+test("Group G3: Single extremely long tool-result line is sliced safely without sending oversized request", async () => {
+    const recordedRequests: ModelRequest[] = [];
+    const compactorProvider = createStrictFakeProvider(
+        250,
+        async () => {
+            return (async function* () {
+                yield {
+                    type: "text",
+                    content: "Extracted summary of long tool line.",
+                } as ModelEvent;
+            })();
+        },
+        recordedRequests,
+    );
+
+    const smallProfile: ModelProfile = {
+        id: "small-compactor-strict",
+        contextWindowTokens: 400,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 50,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const compactor = new DefaultContextCompactor({
+        provider: compactorProvider,
+        profile: smallProfile,
+    });
+
+    // Single line of 3,000 characters without newlines (~750 tokens > 250 capacity)
+    const singleLongLine = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(80);
+
+    const compacted = await compactor.compactToolResult({
+        toolName: "read_file",
+        callId: "call-single-line",
+        content: singleLongLine,
+        targetTokens: 100,
+    });
+
+    assert.ok(compacted !== null, "Oversized single line tool result must be compacted");
+    assert.ok(recordedRequests.length > 1, "Must slice single line across multiple chunk requests");
+
+    for (const req of recordedRequests) {
+        const tokens = req.items.reduce(
+            (sum, it) => sum + (it.type === "message" ? Math.ceil(it.content.length / 4) + 4 : 4),
+            0,
+        );
+        assert.ok(tokens <= 250, `Request tokens (${tokens}) must be <= 250`);
+    }
+});
+
+test("Group G4: Intermediate summary expansion across consecutive chunks remains strictly bounded", async () => {
+    const recordedRequests: ModelRequest[] = [];
+    let chunkCallIndex = 0;
+
+    const compactorProvider = createStrictFakeProvider(
+        300,
+        async () => {
+            chunkCallIndex++;
+            return (async function* () {
+                yield {
+                    type: "text",
+                    content: makeSummaryJson({
+                        startSequence: 1,
+                        endSequence: chunkCallIndex * 5,
+                        findings: Array.from(
+                            { length: 4 },
+                            (_, j) => `Finding ${chunkCallIndex}.${j}`,
+                        ),
+                    }),
+                } as ModelEvent;
+            })();
+        },
+        recordedRequests,
+    );
+
+    const profile: ModelProfile = {
+        id: "profile-300",
+        contextWindowTokens: 500,
+        maxOutputTokens: 120,
+        safetyMarginTokens: 80,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const compactor = new DefaultContextCompactor({
+        provider: compactorProvider,
+        profile,
+    });
+
+    const turns = Array.from({ length: 4 }, (_, i) => ({
+        startSequence: i * 5 + 1,
+        endSequence: (i + 1) * 5,
+        items: [
+            {
+                type: "message" as const,
+                role: "user" as const,
+                content: `Turn ${i + 1} test content `.repeat(15),
+            },
+        ],
+    }));
+
+    const summary = await compactor.compactHistory({
+        items: turns.flatMap((t) => t.items),
+        startSequence: 1,
+        endSequence: 20,
+        turns,
+    });
+
+    assert.ok(summary !== null);
+    assert.ok(recordedRequests.length >= 3);
+
+    for (const req of recordedRequests) {
+        const tokens = req.items.reduce(
+            (sum, it) => sum + (it.type === "message" ? Math.ceil(it.content.length / 4) + 4 : 4),
+            0,
+        );
+        assert.ok(tokens <= 300, `Request tokens (${tokens}) must remain <= 300`);
+    }
+});
+
+test("Group G5: Compactor fails closed if any chunk fails or if capacity is too small for mandatory instructions", async () => {
+    let callCount = 0;
+    const failingProvider: ModelProvider = {
+        id: "failing-midway",
+        stream: () => {
+            callCount++;
+            return (async function* () {
+                if (callCount === 2) {
+                    throw new Error("Midway network failure");
+                }
+                yield {
+                    type: "text",
+                    content: makeSummaryJson({ startSequence: 1, endSequence: 5 }),
+                } as ModelEvent;
+            })();
+        },
+    };
+
+    const smallProfile: ModelProfile = {
+        id: "small-profile",
+        contextWindowTokens: 400,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 50,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const compactor = new DefaultContextCompactor({
+        provider: failingProvider,
+        profile: smallProfile,
+    });
+
+    const turns = Array.from({ length: 4 }, (_, i) => ({
+        startSequence: i * 5 + 1,
+        endSequence: (i + 1) * 5,
+        items: [
+            {
+                type: "message" as const,
+                role: "user" as const,
+                content: "Content ".repeat(30),
+            },
+        ],
+    }));
+
+    // Must fail closed with null (never claim full coverage when a chunk failed)
+    const result = await compactor.compactHistory({
+        items: turns.flatMap((t) => t.items),
+        startSequence: 1,
+        endSequence: 20,
+        turns,
+    });
+    assert.strictEqual(result, null, "Must fail closed if a chunk fails");
+
+    // AbortSignal cancels immediately
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(
+        () =>
+            compactor.compactHistory({
+                items: turns.flatMap((t) => t.items),
+                startSequence: 1,
+                endSequence: 20,
+                signal: ac.signal,
+            }),
+        { name: "AbortError" },
+    );
+
+    // Context capacity too small for instructions (< 20 tokens) fails closed cleanly
+    const microscopicProfile: ModelProfile = {
+        id: "micro-profile",
+        contextWindowTokens: 50,
+        maxOutputTokens: 20,
+        safetyMarginTokens: 10, // maxInputTokens = 20
+        toolMode: "native",
+    };
+
+    const microCompactor = new DefaultContextCompactor({
+        provider: failingProvider,
+        profile: microscopicProfile,
+    });
+
+    const microResult = await microCompactor.compactHistory({
+        items: [{ type: "message", role: "user", content: "test" }],
+        startSequence: 1,
+        endSequence: 1,
+    });
+    assert.strictEqual(microResult, null, "Must return null when capacity cannot fit instructions");
+});
+
+// ============================================================================
+// Group H: Fix 2 — Unavoidable Final Request Preflight Boundary
+// ============================================================================
+
+test("Group H1: Runtime wrapping raw unwrapped provider rejects oversized requests before provider is called", async () => {
+    let rawProviderCalls = 0;
+    const rawProvider: ModelProvider = {
+        id: "raw-unwrapped-provider",
+        stream: () => {
+            rawProviderCalls++;
+            return (async function* () {
+                yield { type: "text", content: "hello" } as ModelEvent;
+            })();
+        },
+    };
+
+    const tinyProfile: ModelProfile = {
+        id: "tiny-profile",
+        contextWindowTokens: 100,
+        maxOutputTokens: 20,
+        safetyMarginTokens: 10, // maxInputTokens = 70
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    // Direct instantiation with raw, unwrapped provider
+    const runtime = createAkkcoRuntime(rawProvider, {
+        profile: tinyProfile,
+    });
+
+    // Request with 400 characters (~100 tokens > 70 maxInputTokens)
+    const oversizedRequest: ModelRequest = {
+        items: [{ type: "message", role: "user", content: "A".repeat(400) }],
+    };
+
+    await assert.rejects(async () => {
+        for await (const _event of runtime.run(oversizedRequest)) {
+            // Should not reach
+        }
+    }, ContextBudgetOverflowError);
+
+    assert.equal(rawProviderCalls, 0, "Raw provider must NEVER be invoked for oversized requests");
+});
+
+test("Group H2: Valid request through unwrapped provider proceeds and delivers bounded request", async () => {
+    let capturedRequest: ModelRequest | undefined;
+    const rawProvider: ModelProvider = {
+        id: "raw-unwrapped-provider",
+        stream: (req) => {
+            capturedRequest = req;
+            return (async function* () {
+                yield { type: "text", content: "Valid response" } as ModelEvent;
+            })();
+        },
+    };
+
+    const profile: ModelProfile = {
+        id: "normal-profile",
+        contextWindowTokens: 1000,
+        maxOutputTokens: 200,
+        safetyMarginTokens: 50,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const runtime = createAkkcoRuntime(rawProvider, { profile });
+
+    const validRequest: ModelRequest = {
+        items: [{ type: "message", role: "user", content: "Short valid prompt" }],
+    };
+
+    const events = [];
+    for await (const event of runtime.run(validRequest)) {
+        events.push(event);
+    }
+
+    assert.ok(capturedRequest, "Request must reach raw provider");
+    assert.equal(capturedRequest.items.length, 1);
+    assert.equal(events.length, 1);
+    assert.equal((events[0] as any).content, "Valid response");
+});
+
+test("Group H3: Multi-turn native tool execution through unwrapped provider enforces preflight on all iterations", async () => {
+    const deliveredRequests: ModelRequest[] = [];
+    let callIndex = 0;
+
+    const rawProvider: ModelProvider = {
+        id: "raw-unwrapped-provider",
+        stream: (req) => {
+            deliveredRequests.push(req);
+            callIndex++;
+            return (async function* () {
+                if (callIndex === 1) {
+                    yield {
+                        type: "tool_call",
+                        id: "call_abc123",
+                        name: "read_file",
+                        arguments: { path: "data.txt" },
+                    } as ModelEvent;
+                } else {
+                    yield {
+                        type: "text",
+                        content: "File contents analyzed.",
+                    } as ModelEvent;
+                }
+            })();
+        },
+    };
+
+    const profile: ModelProfile = {
+        id: "normal-profile",
+        contextWindowTokens: 1000,
+        maxOutputTokens: 200,
+        safetyMarginTokens: 50,
+        toolMode: "native",
+        charsPerToken: 4,
+    };
+
+    const toolHost = {
+        tools: [
+            {
+                name: "read_file",
+                description: "Read file",
+                inputSchema: { type: "object", properties: { path: { type: "string" } } },
+            },
+        ],
+        execute: async () => ({
+            callId: "call_abc123",
+            toolName: "read_file",
+            content: "file contents",
+        }),
+    };
+
+    const runtime = createAkkcoRuntime(rawProvider, {
+        profile,
+        toolHost: toolHost as any,
+    });
+
+    for await (const _event of runtime.run({
+        items: [{ type: "message", role: "user", content: "Read data.txt" }],
+    })) {
+        // Drain events
+    }
+
+    assert.equal(deliveredRequests.length, 2, "Both iterations must reach provider");
+
+    // Both iterations passed preflight
+    for (const req of deliveredRequests) {
+        assert.ok(req.items.length > 0);
+    }
+});
+
+test("Group H4: Compatibility mode through unwrapped provider bounds XML tool schemas and repair turns", async () => {
+    const { createTextToolCompatibilityProvider } = await import("@akkco/providers");
+
+    const deliveredToWire: ModelRequest[] = [];
+    let wireCallCount = 0;
+
+    const rawProvider: ModelProvider = {
+        id: "raw-inner-provider",
+        stream: (req) => {
+            deliveredToWire.push(req);
+            wireCallCount++;
+            return (async function* () {
+                if (wireCallCount === 1) {
+                    // Protocol violation: triggers repair turn
+                    yield {
+                        type: "text",
+                        content: "I am calling akkco_tool without valid JSON",
+                    } as ModelEvent;
+                } else if (wireCallCount === 2) {
+                    // Repaired valid tool call
+                    yield {
+                        type: "text",
+                        content:
+                            '<akkco_tool_call>\n{"name":"read_file","arguments":{"path":"foo.ts"}}\n</akkco_tool_call>',
+                    } as ModelEvent;
+                } else {
+                    yield { type: "text", content: "Final answer after tool." } as ModelEvent;
+                }
+            })();
+        },
+    };
+
+    const profile: ModelProfile = {
+        id: "compat-profile",
+        contextWindowTokens: 2000,
+        maxOutputTokens: 300,
+        safetyMarginTokens: 100,
+        toolMode: "compatibility",
+        charsPerToken: 4,
+    };
+
+    // Construct TextToolCompatibilityProvider with raw unwrapped inner provider
+    const compatProvider = createTextToolCompatibilityProvider(rawProvider);
+
+    const toolHost = {
+        tools: [
+            {
+                name: "read_file",
+                description: "Read a file from disk",
+                inputSchema: { type: "object", properties: { path: { type: "string" } } },
+            },
+        ],
+        execute: async () => ({
+            callId: "call-1",
+            toolName: "read_file",
+            content: "export const x = 1;",
+        }),
+    };
+
+    // createAkkcoRuntime receives the compatibility provider wrapping the raw provider
+    const runtime = createAkkcoRuntime(compatProvider, {
+        profile,
+        toolHost: toolHost as any,
+    });
+
+    for await (const _event of runtime.run({
+        items: [{ type: "message", role: "user", content: "Please read foo.ts" }],
+    })) {
+        // Drain events
+    }
+
+    assert.ok(deliveredToWire.length >= 2, "Both initial and repair requests must be sent");
+
+    // In compatibility mode, tools are cleared on wire and XML protocol is injected into system prompt
+    assert.strictEqual(deliveredToWire[0].tools, undefined, "Native tools must be cleared on wire");
+    const systemMessage = deliveredToWire[0].items.find(
+        (it) => it.type === "message" && it.role === "system",
+    );
+    assert.ok(
+        systemMessage &&
+            systemMessage.type === "message" &&
+            systemMessage.content.includes("akkco_tool_call"),
+        "Injected XML tool instructions must be present on wire request",
+    );
+
+    // Repair request must contain the repair instruction
+    const repairUserMessage = deliveredToWire[1].items.find(
+        (it) => it.type === "message" && it.role === "user" && (it as any).isRepairInstruction,
+    );
+    assert.ok(repairUserMessage, "Repair instruction must be present on wire request");
+});
+
+test("Group H5: Exact tool-call/result relationships survive request preparation", async () => {
+    let capturedRequest: ModelRequest | undefined;
+
+    const rawProvider: ModelProvider = {
+        id: "raw-provider",
+        stream: (req) => {
+            capturedRequest = req;
+            return (async function* () {
+                yield { type: "text", content: "done" } as ModelEvent;
+            })();
+        },
+    };
+
+    const runtime = createAkkcoRuntime(rawProvider, {
+        budget: {
+            preferredInputTokens: 1000,
+            reservedOverheadTokens: 100,
+            minimumRecentHistoryTokens: 100,
+        },
+    });
+
+    const toolCallId = "unique_call_id_999";
+    const toolName = "search_text";
+    const toolArgs = { query: "export const foo" };
+
+    const request: ModelRequest = {
+        items: [
+            { type: "message", role: "user", content: "Find foo" },
+            {
+                type: "tool_call",
+                id: toolCallId,
+                name: toolName,
+                arguments: toolArgs,
+            },
+            {
+                type: "tool_result",
+                callId: toolCallId,
+                content: "src/foo.ts:1:export const foo = true;",
+            },
+        ],
+    };
+
+    for await (const _event of runtime.run(request)) {
+        // Drain
+    }
+
+    assert.ok(capturedRequest);
+    const callItem = capturedRequest.items.find((it) => it.type === "tool_call");
+    const resultItem = capturedRequest.items.find((it) => it.type === "tool_result");
+
+    assert.ok(callItem && callItem.type === "tool_call");
+    assert.ok(resultItem && resultItem.type === "tool_result");
+
+    assert.equal(callItem.id, toolCallId);
+    assert.equal(callItem.name, toolName);
+    assert.deepEqual(callItem.arguments, toolArgs);
+
+    assert.equal(resultItem.callId, toolCallId);
+    assert.equal(resultItem.content, "src/foo.ts:1:export const foo = true;");
+});

@@ -19,6 +19,9 @@ export {
 export {
     createBoundedModelProvider,
     BoundedModelProvider,
+    ensureBoundedProvider,
+    isBoundedModelProvider,
+    BOUNDED_PROVIDER_SYMBOL,
     type BoundedModelProviderOptions,
 } from "./context/bounded-model-provider.js";
 export {

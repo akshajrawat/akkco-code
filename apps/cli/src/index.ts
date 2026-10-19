@@ -72,8 +72,7 @@ const main = async () => {
         });
     }
 
-    const { prepareBoundedModelRequest, createBoundedModelProvider, deriveContextBudget } =
-        await import("@akkco/core");
+    const { createBoundedModelProvider, deriveContextBudget } = await import("@akkco/core");
 
     const boundedNativeProvider = createBoundedModelProvider(nativeProvider, {
         profile: effectiveProfile,
@@ -81,13 +80,7 @@ const main = async () => {
 
     const provider =
         effectiveProfile.toolMode === "compatibility"
-            ? createTextToolCompatibilityProvider(nativeProvider, {
-                  prepareRequest: (req) =>
-                      prepareBoundedModelRequest({
-                          request: req,
-                          profile: effectiveProfile,
-                      }),
-              })
+            ? createTextToolCompatibilityProvider(boundedNativeProvider)
             : boundedNativeProvider;
 
     const isTestMode = Boolean(

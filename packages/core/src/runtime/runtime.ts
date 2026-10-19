@@ -1,12 +1,14 @@
 import type {
     ModelItem,
     ModelMessage,
+    ModelProfile,
     ModelProvider,
     ModelRequest,
     ModelToolCall,
     ModelToolCallEvent,
     ModelToolResult,
 } from "@akkco/models";
+import { ensureBoundedProvider } from "../context/bounded-model-provider.js";
 import { calculateMaxInputTokens, type ContextBudget } from "../context/budget.js";
 import type { ContextCompactor } from "../context/context-compactor.js";
 import { estimateModelItemTokens, estimateTokens } from "../context/token-estimator.js";
@@ -37,6 +39,7 @@ export interface AkkcoRuntimeOptions {
     readonly budget?: ContextBudget;
     readonly compactor?: ContextCompactor;
     readonly maxToolOutputTokens?: number;
+    readonly profile?: ModelProfile;
 }
 
 /**
@@ -58,7 +61,8 @@ export const createAkkcoRuntime = (
             "reliabilityOptions" in toolHostOrOptions ||
             "budget" in toolHostOrOptions ||
             "compactor" in toolHostOrOptions ||
-            "maxToolOutputTokens" in toolHostOrOptions);
+            "maxToolOutputTokens" in toolHostOrOptions ||
+            "profile" in toolHostOrOptions);
 
     const options: AkkcoRuntimeOptions = isOptionsObject
         ? (toolHostOrOptions as AkkcoRuntimeOptions)
@@ -74,6 +78,13 @@ export const createAkkcoRuntime = (
     const effectiveBudget = options.budget;
     const effectiveCompactor = options.compactor;
     const effectiveMaxToolOutputTokens = options.maxToolOutputTokens;
+    const effectiveProfile = options.profile;
+
+    const effectiveProvider = ensureBoundedProvider(provider, {
+        profile: effectiveProfile,
+        budget: effectiveBudget,
+        maxToolOutputTokens: effectiveMaxToolOutputTokens,
+    });
 
     const { maxToolIterations, repeatedToolCallLimit, consecutiveToolErrorLimit } =
         validateReliabilityOptions(options.reliabilityOptions);
@@ -99,13 +110,13 @@ export const createAkkcoRuntime = (
                         items: workingItems,
                         tools: toolHost?.tools,
                         signal: request.signal,
-                        profile: request.profile,
+                        profile: request.profile ?? effectiveProfile,
                     };
 
                     let turnAssistantText = "";
                     const toolCallEvents: ModelToolCallEvent[] = [];
 
-                    for await (const event of provider.stream(effectiveRequest)) {
+                    for await (const event of effectiveProvider.stream(effectiveRequest)) {
                         throwIfAborted(request.signal);
                         if (event.type === "text") {
                             turnAssistantText += event.content;

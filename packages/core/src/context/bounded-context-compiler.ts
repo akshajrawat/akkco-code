@@ -142,40 +142,10 @@ export class BoundedContextCompiler implements ContextCompiler {
         const policyTokens = this.includePolicy
             ? estimateTokens(this.policy, charsPerToken) + 4
             : 0;
-        const rawActiveTurnItems = compileContext(
+        const activeTurnItems = compileContext(
             transcript.slice(currentPromptIndex) as TranscriptItem[],
             { includePolicy: false },
         );
-
-        // Compact oversized tool results in active turn using AI compactor before budget boundary
-        const activeTurnItems: ModelItem[] = [];
-        for (const item of rawActiveTurnItems) {
-            if (item.type === "tool_result" && this.compactor) {
-                const itemTokens = estimateModelItemTokens(item, charsPerToken);
-                const maxToolTokens = Math.floor(effectiveBudget * 0.3);
-                if (itemTokens > maxToolTokens) {
-                    try {
-                        const compacted = await this.compactor.compactToolResult({
-                            toolName: "tool",
-                            callId: item.callId,
-                            content: item.content,
-                            targetTokens: maxToolTokens,
-                            signal: resolvedInput.signal,
-                        });
-                        if (compacted) {
-                            activeTurnItems.push({
-                                ...item,
-                                content: compacted,
-                            });
-                            continue;
-                        }
-                    } catch {
-                        // Operational compaction failure; retain original item and let boundary fail closed
-                    }
-                }
-            }
-            activeTurnItems.push(item);
-        }
 
         const activeTurnTokens = activeTurnItems.reduce(
             (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
@@ -317,12 +287,7 @@ export class BoundedContextCompiler implements ContextCompiler {
         const remainingAfterRecent = Math.max(0, discretionaryAfterSummary - recentTokensUsed);
         const recentIsShort = lastSelectedTurnIndex === 0 || recentTokensUsed < recentSoftTarget;
 
-        const hasExplicitMemoryCap = Boolean(
-            this.budget.isHardMemoryLimit ||
-            (this.budget.maximumMemoryTokens !== undefined &&
-                this.budget !== DEFAULT_CONTEXT_BUDGET &&
-                this.budget.isHardMemoryLimit !== false),
-        );
+        const hasExplicitMemoryCap = Boolean(this.budget.isHardMemoryLimit);
 
         let memoryCeiling = remainingAfterRecent;
         if (hasExplicitMemoryCap) {

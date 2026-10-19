@@ -1,5 +1,6 @@
 import type { ModelItem, ModelProfile, ModelProvider, ModelRequest } from "@akkco/models";
 import type { ConversationStore } from "@akkco/retrieval";
+import { ensureBoundedProvider } from "./bounded-model-provider.js";
 import { calculateMaxInputTokens } from "./budget.js";
 import { estimateModelItemTokens, estimateTokens } from "./token-estimator.js";
 
@@ -209,6 +210,13 @@ export const validateStructuredSummary = (
  * Provider-neutral AI context compactor that produces structured summaries
  * of eligible history and persistently stores them in SQLite.
  */
+const MAX_COMPACTION_CHUNKS = 16;
+const MIN_PRACTICAL_CHUNK_TOKENS = 20;
+
+/**
+ * Provider-neutral AI context compactor that produces structured summaries
+ * of eligible history and persistently stores them in SQLite.
+ */
 export class DefaultContextCompactor implements ContextCompactor {
     private readonly provider: ModelProvider;
     private readonly profile?: ModelProfile;
@@ -217,8 +225,8 @@ export class DefaultContextCompactor implements ContextCompactor {
     private readonly charsPerToken: number;
 
     constructor(options: ContextCompactorOptions) {
-        this.provider = options.provider;
         this.profile = options.profile;
+        this.provider = ensureBoundedProvider(options.provider, { profile: options.profile });
         this.store = options.store;
         this.maxSummaryTokens = options.maxSummaryTokens ?? 1000;
         this.charsPerToken = options.charsPerToken ?? options.profile?.charsPerToken ?? 4;
@@ -288,11 +296,40 @@ export class DefaultContextCompactor implements ContextCompactor {
             return [];
         }
 
+        const maxChunkChars = Math.max(1, maxTokensPerChunk * this.charsPerToken);
+        const splitItems: ModelItem[] = [];
+
+        for (const item of items) {
+            const itemTokens = estimateModelItemTokens(item, this.charsPerToken);
+            if (itemTokens > maxTokensPerChunk) {
+                // Slice oversized single item content into chunks that fit within maxTokensPerChunk
+                if (item.type === "message") {
+                    for (let i = 0; i < item.content.length; i += maxChunkChars) {
+                        splitItems.push({
+                            ...item,
+                            content: item.content.slice(i, i + maxChunkChars),
+                        });
+                    }
+                } else if (item.type === "tool_result") {
+                    for (let i = 0; i < item.content.length; i += maxChunkChars) {
+                        splitItems.push({
+                            ...item,
+                            content: item.content.slice(i, i + maxChunkChars),
+                        });
+                    }
+                } else {
+                    splitItems.push(item);
+                }
+            } else {
+                splitItems.push(item);
+            }
+        }
+
         const chunks: ModelItem[][] = [];
         let currentChunk: ModelItem[] = [];
         let currentChunkTokens = 0;
 
-        for (const item of items) {
+        for (const item of splitItems) {
             const itemTokens = estimateModelItemTokens(item, this.charsPerToken);
             if (currentChunk.length > 0 && currentChunkTokens + itemTokens > maxTokensPerChunk) {
                 chunks.push(currentChunk);
@@ -334,12 +371,17 @@ export class DefaultContextCompactor implements ContextCompactor {
                         this.maxSummaryTokens,
                         this.charsPerToken,
                     );
-                    if (latestCached.endSequence === options.endSequence) {
-                        return validated;
-                    }
-                    if (latestCached.endSequence < options.endSequence) {
-                        previousSummary = validated;
-                        candidateStartSequence = latestCached.endSequence + 1;
+                    if (
+                        validated.sourceRange.startSequence === options.startSequence &&
+                        validated.sourceRange.endSequence <= options.endSequence
+                    ) {
+                        if (latestCached.endSequence === options.endSequence) {
+                            return validated;
+                        }
+                        if (latestCached.endSequence < options.endSequence) {
+                            previousSummary = validated;
+                            candidateStartSequence = latestCached.endSequence + 1;
+                        }
                     }
                 }
             } catch {
@@ -354,9 +396,9 @@ export class DefaultContextCompactor implements ContextCompactor {
         // 2. Identify items to summarize
         let itemsToSummarize: readonly ModelItem[] = options.items;
         if (previousSummary) {
-            if (options.turns) {
+            if (options.turns && options.turns.length > 0) {
                 itemsToSummarize = options.turns
-                    .filter((t) => t.startSequence > previousSummary!.sourceRange.endSequence)
+                    .filter((t) => t.startSequence >= candidateStartSequence)
                     .flatMap((t) => t.items);
             } else if (options.items.length === options.endSequence - options.startSequence + 1) {
                 itemsToSummarize = options.items.slice(
@@ -365,50 +407,84 @@ export class DefaultContextCompactor implements ContextCompactor {
             }
         }
 
-        // Calculate compactor capacity and reserve space for instructions and target output
         const compactorCapacity = this.profile ? calculateMaxInputTokens(this.profile) : 8192;
-        const promptFramingReserved = this.maxSummaryTokens + 600;
-        const maxContentPerRequest = Math.max(400, compactorCapacity - promptFramingReserved);
 
-        const chunks = this.chunkHistoryItems(itemsToSummarize, maxContentPerRequest);
+        const instructions =
+            `Summarize conversation history (sequences ${options.startSequence}-${options.endSequence}) into JSON:\n` +
+            `{"taskOrInvestigation":"","importantFindings":[],"filesAndLocations":[],"decisions":[],"failedApproaches":[],"unresolvedIssues":[],"nextSteps":[],"omissions":""}\n` +
+            `Output strictly valid JSON only.`;
+
+        const instructionsTokens = estimateTokens(instructions, this.charsPerToken) + 4;
+
+        const previousSummaryFramingTemplate =
+            `--- PREVIOUS VALIDATED CONTEXT SUMMARY (sequences ${options.startSequence} to ${options.endSequence}) ---\n` +
+            `\n\n--- NEW CONVERSATION TURNS TO INCORPORATE ---\n`;
+        const framingOverheadTokens =
+            estimateTokens(previousSummaryFramingTemplate, this.charsPerToken) + 8;
+
+        const maxIntermediateSummaryTokens = Math.min(
+            this.maxSummaryTokens,
+            this.profile?.maxOutputTokens ?? this.maxSummaryTokens,
+            Math.floor(compactorCapacity * 0.45),
+        );
+        const reservedForSummary =
+            (previousSummary
+                ? estimateTokens(JSON.stringify(previousSummary), this.charsPerToken)
+                : maxIntermediateSummaryTokens) + framingOverheadTokens;
+
+        const availableContentTokens =
+            compactorCapacity - instructionsTokens - reservedForSummary - 8;
+        if (availableContentTokens < MIN_PRACTICAL_CHUNK_TOKENS) {
+            return null;
+        }
+
+        const chunks = this.chunkHistoryItems(itemsToSummarize, availableContentTokens);
 
         let currentSummary = previousSummary;
 
         if (chunks.length === 0 && currentSummary) {
             return currentSummary;
         }
+        if (chunks.length === 0) {
+            return null;
+        }
+        if (chunks.length > MAX_COMPACTION_CHUNKS) {
+            return null;
+        }
 
-        for (let chunkIdx = 0; chunkIdx < (chunks.length === 0 ? 1 : chunks.length); chunkIdx++) {
+        for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
             if (options.signal?.aborted) {
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
 
-            const chunkItems = chunks.length > 0 ? chunks[chunkIdx] : [];
+            const chunkItems = chunks[chunkIdx];
             const serializedChunk = this.serializeHistoryItems(chunkItems);
 
-            const instructions =
-                "You are an AI context compactor for a software development assistant.\n" +
-                `Summarize the historical conversation context (covering sequences ${options.startSequence} to ${options.endSequence}) into a concise, structured JSON object with this exact shape:\n` +
-                "{\n" +
-                '  "taskOrInvestigation": "Concise summary of the task or objective",\n' +
-                '  "importantFindings": ["Key architectural, structural, or code finding 1", "..."],\n' +
-                '  "filesAndLocations": ["path/to/file.ts", "..."],\n' +
-                '  "decisions": ["Architectural or implementation decision 1", "..."],\n' +
-                '  "failedApproaches": ["Approach tried that failed or was abandoned", "..."],\n' +
-                '  "unresolvedIssues": ["Open question or remaining issue", "..."],\n' +
-                '  "nextSteps": ["Immediate next recommended step", "..."],\n' +
-                '  "omissions": "Description of detailed source code listings, verbose logs, or tool results omitted"\n' +
-                "}\n\n" +
-                "Output strictly valid JSON. Do not include markdown code fences or explanatory text.";
-
             let userContent = "";
+            let promptFraming = "";
             if (currentSummary) {
-                userContent =
+                promptFraming =
                     `--- PREVIOUS VALIDATED CONTEXT SUMMARY (sequences ${currentSummary.sourceRange.startSequence} to ${currentSummary.sourceRange.endSequence}) ---\n` +
-                    JSON.stringify(currentSummary, null, 2) +
-                    `\n\n--- NEW CONVERSATION TURNS TO INCORPORATE ---\n${serializedChunk}`;
+                    JSON.stringify(currentSummary) +
+                    `\n\n--- NEW CONVERSATION TURNS TO INCORPORATE ---\n`;
+                userContent = `${promptFraming}${serializedChunk}`;
             } else {
-                userContent = `--- CONVERSATION HISTORY TO SUMMARIZE ---\n${serializedChunk}`;
+                promptFraming = `--- CONVERSATION HISTORY TO SUMMARIZE ---\n`;
+                userContent = `${promptFraming}${serializedChunk}`;
+            }
+
+            const systemItem: ModelItem = {
+                type: "message",
+                role: "system",
+                content: instructions,
+            };
+            const userItem: ModelItem = { type: "message", role: "user", content: userContent };
+            const totalTokens =
+                estimateModelItemTokens(systemItem, this.charsPerToken) +
+                estimateModelItemTokens(userItem, this.charsPerToken);
+
+            if (totalTokens > compactorCapacity) {
+                return null;
             }
 
             const responseText = await this.executeCompactorPrompt(
@@ -509,20 +585,27 @@ export class DefaultContextCompactor implements ContextCompactor {
         }
 
         const compactorCapacity = this.profile ? calculateMaxInputTokens(this.profile) : 8192;
-        const promptOverhead = 350 + targetBodyTokens;
-        const maxToolChunkTokens = Math.max(400, compactorCapacity - promptOverhead);
+
+        const singlePromptIntro =
+            `Summarize the following output from tool "${options.toolName}" (call ID: "${options.callId}") concisely within ${targetBodyTokens} tokens.\n` +
+            `Preserve all key metadata: tool name, call ID, file paths, line numbers, exit codes, errors, status, and structural findings.\n` +
+            `Explicitly include an omission note stating what information, verbose logs, or details were omitted.\n\n` +
+            `Output:\n`;
+
+        const singlePromptFramingTokens =
+            estimateTokens(singlePromptIntro, this.charsPerToken) + 16;
+        const availableSingleContentTokens = compactorCapacity - singlePromptFramingTokens;
+
+        if (availableSingleContentTokens < MIN_PRACTICAL_CHUNK_TOKENS) {
+            return null;
+        }
 
         const contentTokens = estimateTokens(options.content, this.charsPerToken);
 
         let summaryBody: string | null = null;
 
-        if (contentTokens <= maxToolChunkTokens) {
-            const promptText =
-                `Summarize the following output from tool "${options.toolName}" (call ID: "${options.callId}") concisely within ${targetBodyTokens} tokens.\n` +
-                `Preserve all key metadata: tool name, call ID, file paths, line numbers, exit codes, errors, status, and structural findings.\n` +
-                `Explicitly include an omission note stating what information, verbose logs, or details were omitted.\n\n` +
-                `Output:\n${options.content}`;
-
+        if (contentTokens <= availableSingleContentTokens) {
+            const promptText = `${singlePromptIntro}${options.content}`;
             const response = await this.executeCompactorPrompt(
                 [{ type: "message", role: "user", content: promptText }],
                 options.signal,
@@ -533,25 +616,56 @@ export class DefaultContextCompactor implements ContextCompactor {
             }
             summaryBody = response.trim();
         } else {
-            // Stage/chunk huge tool output line by line without destructive pre-slicing
+            const chunkPromptIntro = (idx: number, total: number, target: number) =>
+                `Extract key findings, file paths, line numbers, error messages, and omissions from part ${idx}/${total} of tool "${options.toolName}" output within ${target} tokens:\n\n`;
+
+            const maxChunkPromptFraming =
+                estimateTokens(chunkPromptIntro(99, 99, targetBodyTokens), this.charsPerToken) + 16;
+            const availableToolChunkTokens = compactorCapacity - maxChunkPromptFraming;
+
+            if (availableToolChunkTokens < MIN_PRACTICAL_CHUNK_TOKENS) {
+                return null;
+            }
+
+            const maxLineChars = Math.max(1, availableToolChunkTokens * this.charsPerToken);
             const lines = options.content.split("\n");
+            const lineSlices: string[] = [];
+
+            for (const line of lines) {
+                const lineTokens = estimateTokens(line, this.charsPerToken) + 1;
+                if (lineTokens > availableToolChunkTokens) {
+                    for (let i = 0; i < line.length; i += maxLineChars) {
+                        lineSlices.push(line.slice(i, i + maxLineChars));
+                    }
+                } else {
+                    lineSlices.push(line);
+                }
+            }
+
             const chunks: string[] = [];
             let currentLines: string[] = [];
             let currentTokens = 0;
 
-            for (const line of lines) {
-                const lineTokens = estimateTokens(line, this.charsPerToken) + 1;
-                if (currentLines.length > 0 && currentTokens + lineTokens > maxToolChunkTokens) {
+            for (const slice of lineSlices) {
+                const sliceTokens = estimateTokens(slice, this.charsPerToken) + 1;
+                if (
+                    currentLines.length > 0 &&
+                    currentTokens + sliceTokens > availableToolChunkTokens
+                ) {
                     chunks.push(currentLines.join("\n"));
-                    currentLines = [line];
-                    currentTokens = lineTokens;
+                    currentLines = [slice];
+                    currentTokens = sliceTokens;
                 } else {
-                    currentLines.push(line);
-                    currentTokens += lineTokens;
+                    currentLines.push(slice);
+                    currentTokens += sliceTokens;
                 }
             }
             if (currentLines.length > 0) {
                 chunks.push(currentLines.join("\n"));
+            }
+
+            if (chunks.length > MAX_COMPACTION_CHUNKS) {
+                return null;
             }
 
             const partialSummaries: string[] = [];
@@ -559,25 +673,31 @@ export class DefaultContextCompactor implements ContextCompactor {
                 if (options.signal?.aborted) {
                     throw new DOMException("The operation was aborted.", "AbortError");
                 }
-                const chunkPrompt = `Extract key findings, file paths, line numbers, error messages, and omissions from part ${i + 1}/${chunks.length} of tool "${options.toolName}" output within ${Math.max(30, Math.floor(targetBodyTokens / chunks.length))} tokens:\n\n${chunks[i]}`;
+                const targetTokensForPart = Math.max(
+                    10,
+                    Math.floor(targetBodyTokens / chunks.length),
+                );
+                const chunkPrompt = `${chunkPromptIntro(i + 1, chunks.length, targetTokensForPart)}${chunks[i]}`;
 
                 const partial = await this.executeCompactorPrompt(
                     [{ type: "message", role: "user", content: chunkPrompt }],
                     options.signal,
                 );
-                if (partial) {
-                    partialSummaries.push(partial.trim());
-                }
-            }
 
-            if (partialSummaries.length === 0) {
-                return null;
+                if (!partial) {
+                    return null;
+                }
+                partialSummaries.push(partial.trim());
             }
 
             const mergePrompt =
                 `Consolidate the following partial summaries for tool "${options.toolName}" (call ID: "${options.callId}") into a single concise summary within ${targetBodyTokens} tokens.\n` +
                 `Preserve file paths, line numbers, error codes, and explicit omissions.\n\n` +
                 partialSummaries.join("\n\n");
+
+            if (estimateTokens(mergePrompt, this.charsPerToken) + 16 > compactorCapacity) {
+                return null;
+            }
 
             const merged = await this.executeCompactorPrompt(
                 [{ type: "message", role: "user", content: mergePrompt }],
@@ -597,7 +717,6 @@ export class DefaultContextCompactor implements ContextCompactor {
         const formatted = makeFormatted(summaryBody);
         const totalEstimated = estimateTokens(formatted, this.charsPerToken) + 4;
 
-        // Strict size enforcement: MUST fit within targetTokens (zero 1.5x tolerance!)
         if (totalEstimated > options.targetTokens) {
             return null;
         }

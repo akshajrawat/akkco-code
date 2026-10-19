@@ -262,9 +262,9 @@ $$\text{maxInputTokens} = 8192 - 1024 - 256 = 6912 \text{ tokens}$$
 **Division of Responsibilities:**
 
 - **ModelProfile (`@akkco/models`)**: Defines raw physical limits, reserved generation space (`maxOutputTokens`), safety buffer (`safetyMarginTokens`), and character token estimation ratio (`charsPerToken`).
-- **ContextCompiler (`@akkco/core`)**: Determines conversational relevance, applies adaptive proportional context allocation, triggers AI compaction for accumulated history, and embeds persistent SQLite summaries while preserving active turn continuity.
-- **AI Compactor (`DefaultContextCompactor` in `@akkco/core`)**: Asynchronous, semantic transformation system. Summarizes older historical turns into structured JSON summaries (findings, locations, decisions, failed approaches, unresolved issues, next steps, and omissions), and compacts active oversized tool results before final preflight. Reuses persistent prefix summaries from SQLite (`findLatestContextSummary`) and prunes intermediate superseded checkpoints. Operates strictly without tools (`tools: undefined`) and bounds compaction requests to the compactor model's capacity.
-- **Request Preparer (`prepareBoundedModelRequest` in `@akkco/core`)**: Authoritative, synchronous, deterministic final budget-enforcement boundary after all prompt expansions and transformations. Performs zero model inference and zero character-based truncation; enforces mandatory items, bounds recent history atomically by turns, and strictly fails closed with `ContextBudgetOverflowError` if any uncompacted or mandatory item exceeds available budget.
+- **ContextCompiler (`@akkco/core`)**: Determines conversational relevance, applies adaptive proportional context allocation, triggers AI compaction for accumulated history, and embeds persistent SQLite summaries while preserving active turn continuity. Does not redundantly compact active tool results.
+- **AI Compactor (`DefaultContextCompactor` in `@akkco/core`)**: Asynchronous, semantic transformation system. Summarizes older historical turns into structured JSON summaries (findings, locations, decisions, failed approaches, unresolved issues, next steps, and omissions), and compacts active oversized tool results before final preflight. Reuses persistent prefix summaries from SQLite (`findLatestContextSummary`) and prunes intermediate superseded checkpoints. Operates strictly without tools (`tools: undefined`), strictly bounds compaction requests to the compactor model's capacity without arbitrary floors, splits single oversized items/lines across chunks, caps operations at $\le 16$ chunks, wraps its internal provider with `ensureBoundedProvider`, and fails closed if any chunk fails.
+- **Request Preparer (`prepareBoundedModelRequest` in `@akkco/core`)**: Authoritative, synchronous, deterministic final budget-enforcement boundary after all prompt expansions and transformations. Enforced universally by `ensureBoundedProvider` across both native and compatibility providers and directly inside `AkkcoRuntime`. Performs zero model inference and zero character-based truncation; enforces mandatory items, bounds recent history atomically by turns, and strictly fails closed with `ContextBudgetOverflowError` if any uncompacted or mandatory item exceeds available budget.
 
 ### Adaptive Context Allocation
 
@@ -289,16 +289,21 @@ When accumulated conversational turns exceed the compaction threshold (~80% of e
 
 - **Continuity Preservation**: The newest historical turn is always preserved intact alongside the active prompt, guaranteeing immediate conversational context and conversational continuity.
 - **Active Tool-Result Compaction (`compactToolResult`)**:
-    - Integrated directly into the runtime agent loop (`AkkcoRuntime`) and context compilation (`BoundedContextCompiler`).
+    - Integrated directly into the runtime agent loop (`AkkcoRuntime`), which exclusively owns active tool-result compaction. `BoundedContextCompiler` strictly handles bounded historical context compilation and never redundantly re-compacts active tool results.
     - Compresses large tool payloads into structured summaries highlighting tool name, call ID, file paths, line numbers, errors, exit codes, and structural findings.
     - Enforces strict sizing ($tokens \le target$) with zero 1.5x tolerance; oversized compaction outputs fail closed.
     - Preserves explicit provenance and omission notes (`[Canonical transcript retains full original output (... characters). Details omitted for token budget.]`).
 - **Incremental Compaction & Prefix Reuse**:
     - Leverages `findLatestContextSummary` in SQLite to reuse existing prefix summaries (e.g., combining an existing summary for sequences 1–20 with delta turns 21–25 into a consolidated 1–25 summary).
-    - Guarantees zero duplicate LLM calls on exact cache hits.
+    - Validates prefix boundary continuity: verifies that the prefix summary's start sequence matches the request's start sequence and that its end sequence falls strictly within the requested range, slicing delta turns from the prefix end sequence onward.
+    - Frames compaction requests with `PREVIOUS VALIDATED CONTEXT SUMMARY` to guarantee continuous, deduplicated summary roll-ups without repeated LLM calls on exact cache hits.
     - Automatically prunes superseded intermediate checkpoints from SQLite (`context_summaries`) upon saving a broader consolidated summary.
 - **Bounded Compaction Invocations**:
-    - Compactor model input capacity is respected: history turns and oversized tool outputs exceeding compactor capacity are chunked logically (line-by-line for tool outputs, turn-by-turn for history) and merged into a consolidated summary.
+    - Compactor model input capacity is strictly respected without arbitrary floors: available chunk content tokens are calculated dynamically as `compactorCapacity - instructionsTokens - reservedForSummary - 8`.
+    - Handles single oversized items: single history items or single tool-result lines exceeding chunk capacity are split into bounded chunks.
+    - Bounded execution: chunking operations are capped at $\le 16$ chunks to prevent infinite compaction cascades.
+    - Fail-closed compaction: if any chunk fails during compaction, the compactor fails closed (never silently dropping failed chunks).
+    - Internal provider bounding: wrapped provider is verified via `ensureBoundedProvider` so compactor requests cannot bypass preflight.
     - Compaction model requests strictly enforce `tools: undefined`, ensuring compaction never triggers nested tool loops.
 - **Lossless Canonical Transcript**: Canonical transcripts in memory (`Session`) and SQLite (`transcript_items`) remain completely lossless and unaltered. Compaction is exclusively a working context projection.
 - **Operational Fault Tolerance**: Compactor errors or provider network failures degrade gracefully to standard turn eviction without corrupting history or crashing the agent session. Abort signals cleanly raise `AbortError`.
@@ -323,9 +328,14 @@ Outbound model requests follow a deterministic structural order:
 
 ### Single Authoritative Final Preflight Boundary
 
-Every model invocation passes through final preflight preparation (`prepareBoundedModelRequest`) before hitting the network:
+Every model invocation passes through final preflight preparation (`prepareBoundedModelRequest`) before hitting the wire:
 
-- **Compatibility Mode**: Handled inside `TextToolCompatibilityProvider.stream()`, which invokes `prepareBoundedModelRequest` after expanding `<akkco_tool_call>` / `<akkco_tool_result>` envelopes on initial requests, normal tool turns, and corrective protocol-repair turns (`COMPATIBILITY_REPAIR_INSTRUCTION`).
+- **Unavoidable Provider Boundary (`ensureBoundedProvider`)**:
+    - Both native and compatibility providers are wrapped with `ensureBoundedProvider`, ensuring requests pass through `prepareBoundedModelRequest`.
+    - `AkkcoRuntime` enforces `ensureBoundedProvider` on any provider passed to it, guaranteeing direct consumers cannot bypass preflight even when passing an unwrapped raw or mock provider.
+    - `ensureBoundedProvider` inspects delegating wrappers (such as `TextToolCompatibilityProvider`): it unwraps and bounds the inner provider, ensuring transformations execute before budget enforcement.
+- **Compatibility Mode Validation**:
+    - In compatibility mode, `TextToolCompatibilityProvider` expands XML tool calls/results and protocol-repair instructions (`COMPATIBILITY_REPAIR_INSTRUCTION`). Because its inner provider is wrapped with `prepareBoundedModelRequest`, the fully expanded outbound request (including tool schemas, XML envelopes, and repair instructions) is validated against the model profile before reaching the wire.
 - **Native Mode**: Wrapped by `BoundedModelProvider` (`createBoundedModelProvider`), ensuring request projection budgeting executes immediately before the wire mapper.
 - **Wire Mapping (`OpenAICompatibleProvider`)**: Maps `profile.maxOutputTokens` directly to the provider payload's `max_tokens`, ensuring inference engines enforce response truncation bounds. Provider-internal metadata (`profile`, `toolResultEnvelope`, etc.) is strictly isolated and never leaked to the wire.
 - **Elimination of Competing Systems**: Legacy character-based slicing (`truncateToolResult`, `truncateCompatibilityToolResult`, `truncateAnyToolResult`) and proportional tool fair-share allocation loops (`allocateToolResultBudgets`) are completely eliminated. Request preparation is strictly synchronous, deterministic, and fails closed.
