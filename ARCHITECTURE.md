@@ -290,6 +290,8 @@ When accumulated conversational turns exceed the compaction threshold (~80% of e
 - **Continuity Preservation**: The newest historical turn is always preserved intact alongside the active prompt, guaranteeing immediate conversational context and conversational continuity.
 - **Active Tool-Result Compaction (`compactToolResult`)**:
     - Integrated directly into the runtime agent loop (`AkkcoRuntime`), which exclusively owns active tool-result compaction. `BoundedContextCompiler` strictly handles bounded historical context compilation and never redundantly re-compacts active tool results.
+    - Preserves full active tool results whenever the complete outgoing request fits safely within model capacity after optional historical-context eviction. AI compaction triggers only when the complete outbound request would exceed available input capacity or an explicitly configured `maxToolOutputTokens` hard limit requires a smaller representation (eliminating arbitrary percentage ceilings).
+    - Resolves one effective `ModelProfile` consistently per runtime invocation (`request.profile ?? effectiveProfile`), governing context capacity, reserved output tokens, safety margin, character-token estimation (`charsPerToken`), compaction decisions, and outbound preflight preparation.
     - Compresses large tool payloads into structured summaries highlighting tool name, call ID, file paths, line numbers, errors, exit codes, and structural findings.
     - Enforces strict sizing ($tokens \le target$) with zero 1.5x tolerance; oversized compaction outputs fail closed.
     - Preserves explicit provenance and omission notes (`[Canonical transcript retains full original output (... characters). Details omitted for token budget.]`).

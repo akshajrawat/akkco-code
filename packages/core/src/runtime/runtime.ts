@@ -9,9 +9,13 @@ import type {
     ModelToolResult,
 } from "@akkco/models";
 import { ensureBoundedProvider } from "../context/bounded-model-provider.js";
-import { calculateMaxInputTokens, type ContextBudget } from "../context/budget.js";
+import type { ContextBudget } from "../context/budget.js";
 import type { ContextCompactor } from "../context/context-compactor.js";
-import { estimateModelItemTokens, estimateTokens } from "../context/token-estimator.js";
+import {
+    calculateAvailableToolTokens,
+    ContextBudgetOverflowError,
+    prepareBoundedModelRequest,
+} from "../context/request-preparer.js";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
 import {
     AgentLoopError,
@@ -92,6 +96,7 @@ export const createAkkcoRuntime = (
     const run = (request: ModelRequest) => {
         return {
             async *[Symbol.asyncIterator](): AsyncGenerator<RuntimeEvent, void, unknown> {
+                const resolvedProfile = request.profile ?? effectiveProfile;
                 const workingItems: ModelItem[] = request.items.map((item) => ({ ...item }));
                 let iterations = 0;
                 let consecutiveToolErrors = 0;
@@ -110,7 +115,7 @@ export const createAkkcoRuntime = (
                         items: workingItems,
                         tools: toolHost?.tools,
                         signal: request.signal,
-                        profile: request.profile ?? effectiveProfile,
+                        profile: resolvedProfile,
                     };
 
                     let turnAssistantText = "";
@@ -302,51 +307,67 @@ export const createAkkcoRuntime = (
 
                             let toolContentForWorkingItems = result.content;
                             if (effectiveCompactor) {
-                                const charsPerToken = request.profile?.charsPerToken ?? 4;
-                                const authorCapacity = request.profile
-                                    ? calculateMaxInputTokens(request.profile)
-                                    : (effectiveBudget?.preferredInputTokens ?? 8192);
-                                const overhead = effectiveBudget?.reservedOverheadTokens ?? 0;
-                                const existingTokens = workingItems.reduce(
-                                    (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
-                                    0,
-                                );
-                                const availableForTool = Math.max(
-                                    64,
-                                    authorCapacity - overhead - existingTokens,
-                                );
-                                const targetToolBudget =
-                                    effectiveMaxToolOutputTokens !== undefined
-                                        ? Math.min(availableForTool, effectiveMaxToolOutputTokens)
-                                        : Math.min(
-                                              availableForTool,
-                                              Math.floor(authorCapacity * 0.3),
-                                          );
+                                let fitsWithoutCompaction = false;
+                                try {
+                                    prepareBoundedModelRequest({
+                                        request: {
+                                            items: [
+                                                ...workingItems,
+                                                {
+                                                    type: "tool_result",
+                                                    callId: call.id,
+                                                    content: result.content,
+                                                },
+                                            ],
+                                            tools: toolHost?.tools,
+                                            signal: request.signal,
+                                            profile: resolvedProfile,
+                                        },
+                                        budget: effectiveBudget,
+                                        profile: resolvedProfile,
+                                        maxToolOutputTokens: effectiveMaxToolOutputTokens,
+                                    });
+                                    fitsWithoutCompaction = true;
+                                } catch (overflowErr) {
+                                    if (overflowErr instanceof ContextBudgetOverflowError) {
+                                        fitsWithoutCompaction = false;
+                                    } else {
+                                        throw overflowErr;
+                                    }
+                                }
 
-                                if (
-                                    estimateTokens(result.content, charsPerToken) > targetToolBudget
-                                ) {
-                                    try {
-                                        const compacted =
-                                            await effectiveCompactor.compactToolResult({
-                                                toolName: call.name,
-                                                callId: call.id,
-                                                content: result.content,
-                                                targetTokens: targetToolBudget,
-                                                signal: request.signal,
-                                            });
-                                        if (compacted) {
-                                            toolContentForWorkingItems = compacted;
+                                if (!fitsWithoutCompaction) {
+                                    const targetToolBudget = calculateAvailableToolTokens({
+                                        items: workingItems,
+                                        tools: toolHost?.tools,
+                                        profile: resolvedProfile,
+                                        budget: effectiveBudget,
+                                        maxToolOutputTokens: effectiveMaxToolOutputTokens,
+                                    });
+
+                                    if (targetToolBudget > 0) {
+                                        try {
+                                            const compacted =
+                                                await effectiveCompactor.compactToolResult({
+                                                    toolName: call.name,
+                                                    callId: call.id,
+                                                    content: result.content,
+                                                    targetTokens: targetToolBudget,
+                                                    signal: request.signal,
+                                                });
+                                            if (compacted) {
+                                                toolContentForWorkingItems = compacted;
+                                            }
+                                        } catch (compactionErr) {
+                                            if (
+                                                request.signal?.aborted ||
+                                                (compactionErr instanceof Error &&
+                                                    compactionErr.name === "AbortError")
+                                            ) {
+                                                throw compactionErr;
+                                            }
+                                            // On compaction error, retain original content and allow downstream preflight to fail closed
                                         }
-                                    } catch (compactionErr) {
-                                        if (
-                                            request.signal?.aborted ||
-                                            (compactionErr instanceof Error &&
-                                                compactionErr.name === "AbortError")
-                                        ) {
-                                            throw compactionErr;
-                                        }
-                                        // On compaction error, retain original content and allow downstream preflight to fail closed
                                     }
                                 }
                             }

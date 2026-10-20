@@ -27,6 +27,14 @@ export interface PrepareBoundedModelRequestOptions {
     readonly maxToolOutputTokens?: number;
 }
 
+export interface CalculateAvailableToolTokensOptions {
+    readonly items: readonly ModelItem[];
+    readonly tools?: readonly ModelTool[];
+    readonly profile?: ModelProfile;
+    readonly budget?: ContextBudget;
+    readonly maxToolOutputTokens?: number;
+}
+
 /**
  * Determines whether a system message is a mandatory policy item that must be preserved,
  * excluding optional instructions or untrusted context with non-policy provenance.
@@ -182,6 +190,125 @@ export const groupHistoricalItems = (
     return groups;
 };
 
+interface EffectiveBudgetLimits {
+    readonly authoritativeBudget: number;
+    readonly reservedOverhead: number;
+    readonly toolsOverhead: number;
+    readonly effectiveBudget: number;
+    readonly charsPerToken: number;
+}
+
+const resolveBudgetLimits = (
+    profile: ModelProfile | undefined,
+    budget: ContextBudget | undefined,
+    tools: readonly ModelTool[] | undefined,
+    maxToolOutputTokens: number | undefined,
+): EffectiveBudgetLimits => {
+    const charsPerToken = profile?.charsPerToken ?? 4;
+    let authoritativeBudget: number;
+    let reservedOverhead: number;
+
+    if (profile) {
+        const margin = profile.safetyMarginTokens ?? 0;
+        const profileInputCap = profile.contextWindowTokens - profile.maxOutputTokens - margin;
+
+        if (budget !== undefined) {
+            validateContextBudget(budget, maxToolOutputTokens);
+            authoritativeBudget = Math.min(profileInputCap, budget.preferredInputTokens);
+        } else {
+            authoritativeBudget = profileInputCap;
+        }
+        reservedOverhead = 0;
+    } else {
+        const effectiveBudgetConfig = budget !== undefined ? budget : DEFAULT_CONTEXT_BUDGET;
+        validateContextBudget(effectiveBudgetConfig, maxToolOutputTokens);
+        authoritativeBudget = effectiveBudgetConfig.preferredInputTokens;
+        reservedOverhead = effectiveBudgetConfig.reservedOverheadTokens;
+    }
+
+    const toolsOverhead = estimateToolsTokens(tools, charsPerToken);
+    const effectiveBudget = authoritativeBudget - reservedOverhead - toolsOverhead;
+
+    return {
+        authoritativeBudget,
+        reservedOverhead,
+        toolsOverhead,
+        effectiveBudget,
+        charsPerToken,
+    };
+};
+
+interface PartitionedRequestItems {
+    readonly mandatorySystemItems: ModelItem[];
+    readonly historicalSlice: ModelItem[];
+    readonly activeTurnItems: ModelItem[];
+}
+
+const partitionRequestItems = (items: readonly ModelItem[]): PartitionedRequestItems => {
+    const mandatorySystemItems: ModelItem[] = [];
+    let firstNonPolicyIndex = 0;
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (isPrivilegedPrefixItem(item)) {
+            mandatorySystemItems.push(item);
+            firstNonPolicyIndex = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    let activeTurnStartIndex = -1;
+    for (let i = items.length - 1; i >= firstNonPolicyIndex; i--) {
+        if (isRealUserPromptItem(items[i])) {
+            activeTurnStartIndex = i;
+            break;
+        }
+    }
+
+    if (activeTurnStartIndex === -1) {
+        activeTurnStartIndex = firstNonPolicyIndex;
+    }
+
+    return {
+        mandatorySystemItems,
+        historicalSlice: items.slice(firstNonPolicyIndex, activeTurnStartIndex),
+        activeTurnItems: items.slice(activeTurnStartIndex),
+    };
+};
+
+/**
+ * Calculates remaining token capacity available for active tool execution in the current turn
+ * after mandatory system policies, tools overhead, and active turn elements are accounted for.
+ */
+export const calculateAvailableToolTokens = (
+    options: CalculateAvailableToolTokensOptions,
+): number => {
+    const { effectiveBudget, charsPerToken } = resolveBudgetLimits(
+        options.profile,
+        options.budget,
+        options.tools,
+        options.maxToolOutputTokens,
+    );
+
+    const { mandatorySystemItems, activeTurnItems } = partitionRequestItems(options.items);
+
+    const mandatorySystemTokens = mandatorySystemItems.reduce(
+        (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
+        0,
+    );
+    const existingActiveTurnTokens = activeTurnItems.reduce(
+        (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
+        0,
+    );
+
+    const availableForTool = effectiveBudget - mandatorySystemTokens - existingActiveTurnTokens;
+
+    if (options.maxToolOutputTokens !== undefined) {
+        return Math.min(availableForTool, options.maxToolOutputTokens);
+    }
+    return availableForTool;
+};
+
 /**
  * Authoritative preflight preparation stage that validates and projects an outbound model request
  * into configured token limits without mutating the canonical session transcript.
@@ -191,33 +318,10 @@ export const prepareBoundedModelRequest = (
 ): ModelRequest => {
     const { request } = options;
     const effectiveProfile = options.profile ?? request.profile;
-    const charsPerToken = effectiveProfile?.charsPerToken ?? 4;
     const maxToolOutputTokens = options.maxToolOutputTokens;
 
-    let authoritativeBudget: number;
-    let reservedOverhead: number;
-
-    if (effectiveProfile) {
-        const margin = effectiveProfile.safetyMarginTokens ?? 0;
-        const profileInputCap =
-            effectiveProfile.contextWindowTokens - effectiveProfile.maxOutputTokens - margin;
-
-        if (options.budget !== undefined) {
-            validateContextBudget(options.budget, maxToolOutputTokens);
-            authoritativeBudget = Math.min(profileInputCap, options.budget.preferredInputTokens);
-        } else {
-            authoritativeBudget = profileInputCap;
-        }
-        reservedOverhead = 0;
-    } else {
-        const budget = options.budget !== undefined ? options.budget : DEFAULT_CONTEXT_BUDGET;
-        validateContextBudget(budget, maxToolOutputTokens);
-        authoritativeBudget = budget.preferredInputTokens;
-        reservedOverhead = budget.reservedOverheadTokens;
-    }
-
-    const toolsOverhead = estimateToolsTokens(request.tools, charsPerToken);
-    const effectiveBudget = authoritativeBudget - reservedOverhead - toolsOverhead;
+    const { authoritativeBudget, reservedOverhead, toolsOverhead, effectiveBudget, charsPerToken } =
+        resolveBudgetLimits(effectiveProfile, options.budget, request.tools, maxToolOutputTokens);
 
     const formatOverflow = (reason: string, requiredTokens: number, capacity: number): string => {
         if (effectiveProfile) {
@@ -250,39 +354,12 @@ export const prepareBoundedModelRequest = (
         };
     }
 
-    // Identify trusted privileged system prefix at start of request
-    const mandatorySystemItems: ModelItem[] = [];
-    let firstNonPolicyIndex = 0;
-    for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (isPrivilegedPrefixItem(item)) {
-            mandatorySystemItems.push(item);
-            firstNonPolicyIndex = i + 1;
-        } else {
-            break;
-        }
-    }
-
-    // Locate active turn: search backwards for real user prompt
-    let activeTurnStartIndex = -1;
-    for (let i = items.length - 1; i >= firstNonPolicyIndex; i--) {
-        if (isRealUserPromptItem(items[i])) {
-            activeTurnStartIndex = i;
-            break;
-        }
-    }
-
-    if (activeTurnStartIndex === -1) {
-        activeTurnStartIndex = firstNonPolicyIndex;
-    }
+    const { mandatorySystemItems, historicalSlice, activeTurnItems } = partitionRequestItems(items);
 
     const mandatorySystemTokens = mandatorySystemItems.reduce(
         (sum, it) => sum + estimateModelItemTokens(it, charsPerToken),
         0,
     );
-
-    // Active turn items
-    const activeTurnItems = items.slice(activeTurnStartIndex);
 
     const activePromptItem =
         activeTurnItems.length > 0 && isRealUserPromptItem(activeTurnItems[0])
@@ -344,7 +421,6 @@ export const prepareBoundedModelRequest = (
     );
 
     // Optional historical items
-    const historicalSlice = items.slice(firstNonPolicyIndex, activeTurnStartIndex);
     const historicalGroups = groupHistoricalItems(historicalSlice, charsPerToken);
     const selectedHistory: ModelItem[] = [];
 
