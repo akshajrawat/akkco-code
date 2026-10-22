@@ -610,6 +610,7 @@ test(
             cwd: path.resolve(__dirname, "../../.."),
             env: {
                 ...process.env,
+                AKKCO_TOOL_MODE: "compatibility",
                 AKKCO_MAX_TOOL_ITERATIONS: "1",
                 AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
             },
