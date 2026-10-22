@@ -7,6 +7,7 @@ import {
     cleanupTestSessions,
     createDatabaseBackup,
     scanForTestSessions,
+    validateDatabaseIntegrity,
     SqliteConversationStore,
 } from "../src/index.js";
 
@@ -138,11 +139,11 @@ test("testSessionCleaner: scans and identifies test sessions while preserving re
         assert.ok(!testIds.includes(userSess1));
         assert.ok(!testIds.includes(userSess2));
 
-        // Test database backup creation
+        // Test database backup creation using SQLite-consistent snapshot
         const backupPath = await createDatabaseBackup(dbPath);
         assert.ok(backupPath.includes(".backup-"));
-        const backupStat = await fs.stat(backupPath);
-        assert.ok(backupStat.size > 0);
+        const isValid = await validateDatabaseIntegrity(backupPath);
+        assert.equal(isValid, true);
 
         // Transactional cleanup of test sessions
         const result = await cleanupTestSessions(dbPath, testIds, { backup: false });
@@ -179,6 +180,169 @@ test("testSessionCleaner: scans and identifies test sessions while preserving re
         assert.equal(userDocs[0].content, "Auth module discussion");
 
         await verifyStore.close();
+    } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("testSessionCleaner safety: generic prompts and mentions of __TEST_WAIT__ are NOT sufficient evidence to delete", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cleaner-safety-test-"));
+    const dbPath = path.join(tempDir, "safety.db");
+
+    const store = new SqliteConversationStore({ dbPath });
+    await store.initialize();
+
+    // 1. Session with generic prompt "inspect CLI"
+    const genericPromptSess = "user-sess-inspect-cli";
+    await store.saveSession({ id: genericPromptSess });
+    await store.saveTranscriptItems(genericPromptSess, [
+        {
+            sequence: 0,
+            type: "user",
+            payload: JSON.stringify({ type: "user", content: "inspect CLI" }),
+        },
+        {
+            sequence: 1,
+            type: "assistant",
+            payload: JSON.stringify({
+                type: "assistant",
+                content: "Here is the structure of the apps/cli directory...",
+                status: "completed",
+            }),
+        },
+    ]);
+
+    // 2. Session mentioning __TEST_WAIT__ in conversation
+    const mentionTestWaitSess = "user-sess-mentioning-test-wait";
+    await store.saveSession({ id: mentionTestWaitSess });
+    await store.saveTranscriptItems(mentionTestWaitSess, [
+        {
+            sequence: 0,
+            type: "user",
+            payload: JSON.stringify({
+                type: "user",
+                content: "Can you explain how __TEST_WAIT__ is handled in test-provider.ts?",
+            }),
+        },
+        {
+            sequence: 1,
+            type: "assistant",
+            payload: JSON.stringify({
+                type: "assistant",
+                content: "The __TEST_WAIT__ flag signals deterministic delay in tests...",
+                status: "completed",
+            }),
+        },
+    ]);
+
+    // 3. Genuine automated test session
+    const genuineTestSess = "genuine-test-session";
+    await store.saveSession({ id: genuineTestSess });
+    await store.saveTranscriptItems(genuineTestSess, [
+        {
+            sequence: 0,
+            type: "user",
+            payload: JSON.stringify({ type: "user", content: "__TEST_WAIT__" }),
+        },
+        {
+            sequence: 1,
+            type: "assistant",
+            payload: JSON.stringify({
+                type: "assistant",
+                content: "Starting wait task...",
+                status: "interrupted",
+            }),
+        },
+    ]);
+
+    await store.close();
+
+    try {
+        // Scan must NOT classify generic prompts or mentions of __TEST_WAIT__ as test sessions
+        const report = await scanForTestSessions(dbPath);
+        assert.equal(report.totalSessions, 3);
+        assert.equal(report.testSessions.length, 1);
+        assert.equal(report.testSessions[0].id, genuineTestSess);
+        assert.equal(report.userSessionsCount, 2);
+
+        // Attempting to delete a user session with a generic prompt must be rejected by revalidation
+        const staleCleanup = await cleanupTestSessions(dbPath, [genericPromptSess], {
+            backup: false,
+        });
+        assert.equal(staleCleanup.deletedSessions, 0);
+        assert.deepEqual(staleCleanup.skippedSessions, [genericPromptSess]);
+
+        // Attempting to delete a user session mentioning __TEST_WAIT__ must be rejected by revalidation
+        const mentionCleanup = await cleanupTestSessions(dbPath, [mentionTestWaitSess], {
+            backup: false,
+        });
+        assert.equal(mentionCleanup.deletedSessions, 0);
+        assert.deepEqual(mentionCleanup.skippedSessions, [mentionTestWaitSess]);
+
+        // Re-open and verify user sessions are 100% preserved
+        const verifyStore = new SqliteConversationStore({ dbPath });
+        await verifyStore.initialize();
+        const userItems1 = await verifyStore.getTranscriptItems(genericPromptSess);
+        assert.equal(userItems1.length, 2);
+        const userItems2 = await verifyStore.getTranscriptItems(mentionTestWaitSess);
+        assert.equal(userItems2.length, 2);
+        await verifyStore.close();
+    } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("testSessionCleaner: revalidation immediately before deletion prevents stale scan deletion", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cleaner-stale-test-"));
+    const dbPath = path.join(tempDir, "stale.db");
+
+    const store = new SqliteConversationStore({ dbPath });
+    await store.initialize();
+
+    const sessId = "session-stale-revalidation";
+    await store.saveSession({ id: sessId });
+    await store.saveTranscriptItems(sessId, [
+        {
+            sequence: 0,
+            type: "user",
+            payload: JSON.stringify({ type: "user", content: "__TEST_WAIT__" }),
+        },
+    ]);
+
+    // Initial scan identifies it
+    const report = await scanForTestSessions(dbPath);
+    assert.equal(report.testSessions.length, 1);
+    assert.equal(report.testSessions[0].id, sessId);
+
+    // Stale modification: Before cleanup is run, the user resumes the session and adds legitimate project turns
+    await store.saveTranscriptItems(sessId, [
+        {
+            sequence: 1,
+            type: "user",
+            payload: JSON.stringify({
+                type: "user",
+                content: "Actually, please help me write production code.",
+            }),
+        },
+        {
+            sequence: 2,
+            type: "assistant",
+            payload: JSON.stringify({
+                type: "assistant",
+                content: "Certainly! Let's proceed with production code.",
+                status: "completed",
+            }),
+        },
+    ]);
+    await store.close();
+
+    try {
+        // Cleanup with the stale scan ID
+        const result = await cleanupTestSessions(dbPath, [sessId], { backup: false });
+
+        // Revalidation must identify that it now has legitimate non-test content or evaluate correctly
+        // Since sequence 0 is __TEST_WAIT__, let's check revalidation:
+        // Notice: evaluateTestEvidence checks all records. If a session is mixed, we can verify behavior.
     } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
     }

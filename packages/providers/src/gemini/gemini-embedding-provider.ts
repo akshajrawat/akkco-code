@@ -8,6 +8,8 @@ export interface GeminiEmbeddingConfig {
     readonly taskType?: string;
     readonly maxRetries?: number;
     readonly timeoutMs?: number;
+    readonly overallTimeoutBudgetMs?: number;
+    readonly autoTruncate?: boolean;
     readonly maxInputTokens?: number;
     readonly fetch?: typeof globalThis.fetch;
 }
@@ -46,6 +48,8 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
     readonly dimensions: number;
     readonly timeoutMs: number;
     readonly maxRetries: number;
+    readonly overallTimeoutBudgetMs: number;
+    readonly autoTruncate: boolean;
     readonly maxInputTokens: number;
     private readonly apiKey: string;
     private readonly baseUrl: string;
@@ -88,6 +92,11 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
             typeof config.maxRetries === "number" && config.maxRetries >= 0 ? config.maxRetries : 2;
         this.timeoutMs =
             typeof config.timeoutMs === "number" && config.timeoutMs > 0 ? config.timeoutMs : 10000;
+        this.overallTimeoutBudgetMs =
+            typeof config.overallTimeoutBudgetMs === "number" && config.overallTimeoutBudgetMs > 0
+                ? config.overallTimeoutBudgetMs
+                : (this.maxRetries + 1) * this.timeoutMs + this.maxRetries * 5000;
+        this.autoTruncate = config.autoTruncate ?? false;
         this.maxInputTokens =
             typeof config.maxInputTokens === "number" && config.maxInputTokens > 0
                 ? config.maxInputTokens
@@ -95,28 +104,87 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
         this.fetch = config.fetch ?? globalThis.fetch;
     }
 
-    private boundInput = (text: string): string => {
+    /**
+     * Bounds input text so its output strictly satisfies its configured token-estimation budget.
+     * Preserves head and tail context with an explicit truncation delimiter without splitting
+     * multi-byte surrogate pairs, handling code-heavy text, CJK, emoji, and extremely long strings.
+     */
+    boundInput = (text: string): string => {
         const estimatedTokens = estimateTokensForGemini(text);
         if (estimatedTokens <= this.maxInputTokens) {
             return text;
         }
 
-        const TRUNCATION_DELIMITER =
-            "\n\n[... content truncated for embedding: exceeds 2048 token limit ...]\n\n";
+        const delimiter = `\n\n[... content truncated for embedding: exceeds ${this.maxInputTokens} token limit ...]\n\n`;
+        const delimiterTokens = estimateTokensForGemini(delimiter);
+        const availableTokens = Math.max(10, this.maxInputTokens - delimiterTokens);
 
-        // Use Array.from to safely iterate over Unicode code points without splitting surrogate pairs
-        const codePoints = Array.from(text);
-        const targetCodePoints = Math.max(100, Math.floor(this.maxInputTokens * 2.5));
-        const headSize = Math.floor(targetCodePoints * 0.45);
-        const tailSize = Math.floor(targetCodePoints * 0.45);
+        // Split available token budget between head (50%) and tail (50%)
+        const headTargetTokens = Math.floor(availableTokens * 0.5);
+        const tailTargetTokens = availableTokens - headTargetTokens;
 
-        if (codePoints.length <= headSize + tailSize) {
-            return text;
+        // Extract head code points respecting headTargetTokens
+        const headParts: string[] = [];
+        let headTokens = 0;
+        for (const char of text) {
+            const charTokens =
+                (char.codePointAt(0) ?? 0) > 0x7f
+                    ? 1.5
+                    : /[ \t\n{}()[\];:,.<>+=!*&|~^/%-]/.test(char)
+                      ? 0.8
+                      : 0.3;
+            if (headTokens + charTokens > headTargetTokens) {
+                break;
+            }
+            headParts.push(char);
+            headTokens += charTokens;
         }
 
-        const head = codePoints.slice(0, headSize).join("");
-        const tail = codePoints.slice(codePoints.length - tailSize).join("");
-        return `${head}${TRUNCATION_DELIMITER}${tail}`;
+        // Extract tail code points scanning backwards from end of string without creating huge arrays
+        const tailParts: string[] = [];
+        let tailTokens = 0;
+        let index = text.length;
+
+        while (index > 0) {
+            // Check if previous char is a low surrogate (part of surrogate pair)
+            let charLength = 1;
+            const code = text.charCodeAt(index - 1);
+            if (code >= 0xdc00 && code <= 0xdfff && index >= 2) {
+                const prevCode = text.charCodeAt(index - 2);
+                if (prevCode >= 0xd800 && prevCode <= 0xdbff) {
+                    charLength = 2;
+                }
+            }
+            const char = text.slice(index - charLength, index);
+            const charTokens =
+                (char.codePointAt(0) ?? 0) > 0x7f
+                    ? 1.5
+                    : /[ \t\n{}()[\];:,.<>+=!*&|~^/%-]/.test(char)
+                      ? 0.8
+                      : 0.3;
+            if (tailTokens + charTokens > tailTargetTokens) {
+                break;
+            }
+            tailParts.unshift(char);
+            tailTokens += charTokens;
+            index -= charLength;
+        }
+
+        let result = `${headParts.join("")}${delimiter}${tailParts.join("")}`;
+
+        // Invariant guard: strictly guarantee estimateTokensForGemini(result) <= this.maxInputTokens
+        while (estimateTokensForGemini(result) > this.maxInputTokens) {
+            if (tailParts.length > 0) {
+                tailParts.shift();
+            } else if (headParts.length > 0) {
+                headParts.pop();
+            } else {
+                break;
+            }
+            result = `${headParts.join("")}${delimiter}${tailParts.join("")}`;
+        }
+
+        return result;
     };
 
     private sleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
@@ -195,8 +263,10 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
                     content: {
                         parts: [{ text: boundedText }],
                     },
-                    autoTruncate: true,
                 };
+                if (this.autoTruncate) {
+                    req.autoTruncate = true;
+                }
                 if (this.dimensions !== undefined) {
                     req.outputDimensionality = this.dimensions;
                 }
@@ -211,6 +281,7 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
             });
 
             const body = JSON.stringify({ requests });
+            const batchStartTime = Date.now();
 
             let attempt = 0;
             while (true) {
@@ -218,12 +289,23 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
                     throw new DOMException("The operation was aborted.", "AbortError");
                 }
 
+                const elapsed = Date.now() - batchStartTime;
+                const remainingOverallMs = this.overallTimeoutBudgetMs - elapsed;
+                if (remainingOverallMs <= 0) {
+                    throw new Error(
+                        `Gemini embedding request exceeded overall timeout budget of ${this.overallTimeoutBudgetMs}ms across attempts`,
+                    );
+                }
+
+                const currentAttemptTimeoutMs = Math.min(this.timeoutMs, remainingOverallMs);
                 const timeoutController = new AbortController();
                 const timer = setTimeout(() => {
                     timeoutController.abort(
-                        new Error(`Gemini embedding request timed out after ${this.timeoutMs}ms`),
+                        new Error(
+                            `Gemini embedding request timed out after ${currentAttemptTimeoutMs}ms`,
+                        ),
                     );
-                }, this.timeoutMs);
+                }, currentAttemptTimeoutMs);
 
                 const onCallerAbort = () => {
                     timeoutController.abort(
@@ -252,18 +334,21 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
                     if (signal?.aborted) {
                         throw new DOMException("The operation was aborted.", "AbortError");
                     }
+                    const canRetry =
+                        attempt < this.maxRetries &&
+                        Date.now() - batchStartTime < this.overallTimeoutBudgetMs;
                     if (timeoutController.signal.aborted && !signal?.aborted) {
-                        if (attempt < this.maxRetries) {
+                        if (canRetry) {
                             attempt++;
                             const delay = this.calculateBackoff(attempt);
                             await this.sleep(delay, signal);
                             continue;
                         }
                         throw new Error(
-                            `Gemini embedding request timed out after ${this.timeoutMs}ms`,
+                            `Gemini embedding request timed out after ${currentAttemptTimeoutMs}ms`,
                         );
                     }
-                    if (attempt < this.maxRetries) {
+                    if (canRetry) {
                         attempt++;
                         const delay = this.calculateBackoff(attempt);
                         await this.sleep(delay, signal);
@@ -299,7 +384,13 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
                         response.status === 429 ||
                         (response.status >= 500 && response.status < 600);
 
-                    if (isRetryable && attempt < this.maxRetries && !signal?.aborted) {
+                    const canRetry =
+                        isRetryable &&
+                        attempt < this.maxRetries &&
+                        !signal?.aborted &&
+                        Date.now() - batchStartTime < this.overallTimeoutBudgetMs;
+
+                    if (canRetry) {
                         attempt++;
                         const retryAfter = response.headers.get("retry-after");
                         const delay = this.calculateBackoff(attempt, retryAfter);

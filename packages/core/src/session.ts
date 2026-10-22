@@ -184,18 +184,19 @@ export class Session {
                                 }
                             }
 
-                            if (completed) {
-                                try {
-                                    await self.persistence.onTurnCompleted?.(
+                            if (completed && self.persistence.onTurnCompleted) {
+                                // Background memory indexing is intentionally asynchronous so it does not
+                                // unnecessarily delay user-visible turn completion. Canonical transcript persistence
+                                // is already guaranteed by saveTranscriptItems above. Drain coordination
+                                // during shutdown is handled by orchestrator.waitForPendingIndexing().
+                                void self.persistence
+                                    .onTurnCompleted(
                                         self.id,
                                         turnItems,
                                         turnStartSequence,
                                         turnEndSequence,
-                                        { signal },
-                                    );
-                                } catch {
-                                    // Memory indexing failure must NEVER fail an otherwise completed turn
-                                }
+                                    )
+                                    .catch(() => {});
                             }
                         }
                     } finally {

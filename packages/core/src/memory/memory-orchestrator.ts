@@ -12,6 +12,7 @@ export interface MemoryIndexingDiagnostic {
 
 export interface ConversationMemoryOrchestratorOptions {
     readonly indexingTimeoutMs?: number;
+    readonly maxConcurrency?: number;
     readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
 }
 
@@ -33,10 +34,13 @@ export interface SessionPersistence {
 
 /**
  * Orchestrates transcript record persistence and asynchronous background memory indexing
- * with timeout bounding and drain coordination during session shutdown.
+ * with coordinated timeout bounding, bounded concurrency, and drain coordination during shutdown.
  */
 export class ConversationMemoryOrchestrator implements SessionPersistence {
     private readonly inFlightIndexing = new Set<Promise<void>>();
+    private readonly queue: Array<() => Promise<void>> = [];
+    private activeCount = 0;
+    readonly maxConcurrency: number;
     readonly indexingTimeoutMs: number;
     private readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
 
@@ -45,17 +49,30 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
         private readonly embeddingProvider?: EmbeddingProvider,
         indexingTimeoutOrOptions?: number | ConversationMemoryOrchestratorOptions,
     ) {
+        const providerBudget =
+            typeof (embeddingProvider as any)?.overallTimeoutBudgetMs === "number"
+                ? (embeddingProvider as any).overallTimeoutBudgetMs + 5000
+                : typeof (embeddingProvider as any)?.timeoutMs === "number"
+                  ? (embeddingProvider as any).timeoutMs * 3 + 10000
+                  : 5000;
+
         const defaultTimeout =
-            embeddingProvider?.id === "gemini"
-                ? Math.max(15000, (embeddingProvider.timeoutMs ?? 10000) + 5000)
-                : 5000;
+            embeddingProvider?.id === "gemini" ? Math.max(45000, providerBudget) : providerBudget;
+
         if (typeof indexingTimeoutOrOptions === "number") {
             this.indexingTimeoutMs = indexingTimeoutOrOptions;
+            this.maxConcurrency = 1;
         } else if (indexingTimeoutOrOptions && typeof indexingTimeoutOrOptions === "object") {
             this.indexingTimeoutMs = indexingTimeoutOrOptions.indexingTimeoutMs ?? defaultTimeout;
+            this.maxConcurrency =
+                typeof indexingTimeoutOrOptions.maxConcurrency === "number" &&
+                indexingTimeoutOrOptions.maxConcurrency > 0
+                    ? indexingTimeoutOrOptions.maxConcurrency
+                    : 1;
             this.onDiagnostic = indexingTimeoutOrOptions.onDiagnostic;
         } else {
             this.indexingTimeoutMs = defaultTimeout;
+            this.maxConcurrency = 1;
         }
     }
 
@@ -79,7 +96,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
 
     /**
      * Handles completed turn persistence by deriving a memory document and indexing it
-     * with an embedding vector in the background with a bounded timeout.
+     * with an embedding vector in the background with bounded concurrency and timeout.
      */
     onTurnCompleted = async (
         sessionId: string,
@@ -124,6 +141,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                     return;
                 }
 
+                // Full original memory document is stored in SQLite
                 await this.store.saveMemoryDocument({
                     sessionId,
                     startSequence: derivedDoc.startSequence,
@@ -164,12 +182,41 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
             }
         };
 
-        const task = runIndexing();
-        this.inFlightIndexing.add(task);
-        try {
-            await task;
-        } finally {
-            this.inFlightIndexing.delete(task);
+        return new Promise<void>((resolve, reject) => {
+            let trackingResolve: () => void;
+            const trackingPromise = new Promise<void>((r) => {
+                trackingResolve = r;
+            });
+            this.inFlightIndexing.add(trackingPromise);
+
+            const taskWrapper = async () => {
+                try {
+                    await runIndexing();
+                    resolve();
+                } catch (err) {
+                    reject(err);
+                } finally {
+                    this.inFlightIndexing.delete(trackingPromise);
+                    trackingResolve();
+                }
+            };
+
+            this.queue.push(taskWrapper);
+            this.drainQueue();
+        });
+    };
+
+    private drainQueue = (): void => {
+        while (this.activeCount < this.maxConcurrency && this.queue.length > 0) {
+            const next = this.queue.shift();
+            if (!next) {
+                break;
+            }
+            this.activeCount++;
+            void next().finally(() => {
+                this.activeCount--;
+                this.drainQueue();
+            });
         }
     };
 

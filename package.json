@@ -16,6 +16,7 @@
         "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/*.test.ts\"",
         "test:tui": "tsx --test \"apps/cli/test/pty/**/*.test.ts\"",
         "clean:test-sessions": "tsx apps/cli/src/scripts/clean-test-sessions.ts",
+        "test:gemini-smoke": "tsx packages/providers/test/gemini-api.smoke.test.ts",
         "verify": "npm run format:check && npm run typecheck && npm test && npm run test:tui",
         "prepare": "husky"
     },

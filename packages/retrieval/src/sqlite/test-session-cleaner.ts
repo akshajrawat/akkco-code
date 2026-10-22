@@ -1,4 +1,4 @@
-import { copyFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 
 export interface IdentifiedTestSession {
@@ -8,6 +8,8 @@ export interface IdentifiedTestSession {
     readonly reason: string;
     readonly samplePrompt?: string;
     readonly transcriptCount: number;
+    readonly isProbable?: boolean;
+    readonly deletionAuthorized?: boolean;
 }
 
 export interface TestSessionScanReport {
@@ -23,9 +25,17 @@ export interface CleanupResult {
     readonly deletedTranscripts: number;
     readonly deletedMemories: number;
     readonly deletedSummaries: number;
+    readonly skippedSessions?: readonly string[];
 }
 
-const TEST_PROMPT_PATTERNS = [
+export interface TestEvidenceEvaluation {
+    readonly isProbableTest: boolean;
+    readonly isAuthorizedForDeletion: boolean;
+    readonly reason: string;
+    readonly samplePrompt?: string;
+}
+
+const TEST_DIRECTIVE_PATTERNS = [
     "__TEST_WAIT__",
     "__TEST_LONG__",
     "__TEST_TOOL__",
@@ -41,12 +51,17 @@ const TEST_RESPONSE_PATTERNS = [
 
 /**
  * Checks whether the transcript records of a session match verifiable automated test signatures.
+ * Separates probable test detection from deletion authorization:
+ * - Generic prompts such as "inspect CLI" or mentions of "__TEST_WAIT__" are explicitly rejected
+ *   as sufficient evidence to authorize deletion.
+ * - Deletion authorization requires verifiable test provider output, mock call IDs, or strict test directives.
  */
-const evaluateTestEvidence = (
+export const evaluateTestEvidence = (
     records: readonly { type: string; payload: string }[],
-): { isTest: boolean; reason: string; samplePrompt?: string } => {
+): TestEvidenceEvaluation => {
     let samplePrompt: string | undefined;
 
+    // First pass: extract user prompts and check for legitimate conversational turns
     for (const record of records) {
         let content = "";
         try {
@@ -59,67 +74,52 @@ const evaluateTestEvidence = (
             content = record.payload;
         }
 
-        // 1. Explicit automated test prompt markers
-        for (const marker of TEST_PROMPT_PATTERNS) {
-            if (content.includes(marker)) {
-                return {
-                    isTest: true,
-                    reason: `Contains test prompt marker: "${marker}"`,
-                    samplePrompt,
-                };
-            }
-        }
-
-        // 2. Deterministic test provider canned response patterns
+        // 1. Verifiable DeterministicTestProvider canned responses (authoritative test evidence)
         for (const pattern of TEST_RESPONSE_PATTERNS) {
             if (content.includes(pattern)) {
                 return {
-                    isTest: true,
+                    isProbableTest: true,
+                    isAuthorizedForDeletion: true,
                     reason: `Contains DeterministicTestProvider canned response: "${pattern}"`,
                     samplePrompt,
                 };
             }
         }
 
-        // 3. Automated CLI unit test mock patterns
+        // 2. Automated CLI unit test mock tool call IDs (authoritative test harness signatures)
         if (
             record.payload.includes('"callId":"call_test_list"') ||
-            record.payload.includes('"callId":"read-call"') ||
-            (record.payload.includes('"arguments":{"path":"apps/cli/package.json"}') &&
-                (record.payload.includes("inspect CLI") ||
-                    record.payload.includes("inspect the CLI") ||
-                    record.payload.includes("run tool loop")))
+            record.payload.includes('"callId":"read-call"')
         ) {
             return {
-                isTest: true,
-                reason: "Matches automated CLI tool loop mock test signature",
+                isProbableTest: true,
+                isAuthorizedForDeletion: true,
+                reason: "Matches automated CLI mock tool call signature",
                 samplePrompt,
             };
         }
 
+        // 3. Automated CLI multi-turn test sequences
         if (
             (content === "first turn" || content === "second turn") &&
             records.some((r) => r.payload.includes("slow response"))
         ) {
             return {
-                isTest: true,
+                isProbableTest: true,
+                isAuthorizedForDeletion: true,
                 reason: "Matches CLI SIGINT cancellation test turn sequence",
                 samplePrompt,
             };
         }
 
-        if (content === "first line\nsecond line\nthird line") {
+        if (
+            content === "first line\nsecond line\nthird line" &&
+            records.some((r) => r.type === "assistant")
+        ) {
             return {
-                isTest: true,
+                isProbableTest: true,
+                isAuthorizedForDeletion: true,
                 reason: "Matches CLI bracketed multiline paste test input",
-                samplePrompt,
-            };
-        }
-
-        if (content === "inspect CLI" || content === "inspect the CLI") {
-            return {
-                isTest: true,
-                reason: "Matches CLI tool inspect test input",
                 samplePrompt,
             };
         }
@@ -134,21 +134,97 @@ const evaluateTestEvidence = (
             )
         ) {
             return {
-                isTest: true,
+                isProbableTest: true,
+                isAuthorizedForDeletion: true,
                 reason: "Matches CLI piped turn queue test sequence",
                 samplePrompt,
             };
         }
+
+        // 4. Test directive commands: Must strictly start with or equal the directive.
+        // Merely mentioning "__TEST_WAIT__" in conversational text (e.g., "How does __TEST_WAIT__ work?")
+        // is NOT sufficient evidence to authorize deletion.
+        for (const marker of TEST_DIRECTIVE_PATTERNS) {
+            const trimmed = content.trim();
+            const isDirectiveCommand =
+                trimmed === marker ||
+                trimmed.startsWith(`${marker} `) ||
+                trimmed.startsWith(`${marker}\n`);
+
+            if (isDirectiveCommand) {
+                return {
+                    isProbableTest: true,
+                    isAuthorizedForDeletion: true,
+                    reason: `Matches automated test harness directive: "${marker}"`,
+                    samplePrompt,
+                };
+            }
+        }
     }
 
-    return { isTest: false, reason: "", samplePrompt };
+    // Generic prompts like "inspect CLI", "inspect the CLI", or mentions of test flags
+    // without test provider signatures are classified as normal user sessions.
+    return {
+        isProbableTest: false,
+        isAuthorizedForDeletion: false,
+        reason: "",
+        samplePrompt,
+    };
+};
+
+/**
+ * Validates the SQLite database integrity of a file, verifying that it is non-empty
+ * and passes SQLite's PRAGMA integrity_check.
+ */
+export const validateDatabaseIntegrity = async (dbPath: string): Promise<boolean> => {
+    const info = await stat(dbPath);
+    if (info.size === 0) {
+        throw new Error(`Database validation failed: file "${dbPath}" is empty.`);
+    }
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+        const rows = db.prepare("PRAGMA integrity_check;").all() as Array<{
+            integrity_check: string;
+        }>;
+        const isOk = rows.length === 1 && rows[0].integrity_check === "ok";
+        if (!isOk) {
+            throw new Error(
+                `Database integrity check failed for "${dbPath}": ${JSON.stringify(rows)}`,
+            );
+        }
+        return true;
+    } finally {
+        db.close();
+    }
+};
+
+/**
+ * Creates a SQLite-consistent snapshot backup of a persistent database using SQLite's VACUUM INTO,
+ * and validates the backup's integrity before returning.
+ */
+export const createDatabaseBackup = async (dbPath: string): Promise<string> => {
+    const backupPath = `${dbPath}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+        const escaped = backupPath.replace(/'/g, "''");
+        db.exec(`VACUUM INTO '${escaped}';`);
+    } finally {
+        db.close();
+    }
+
+    // Validate backup integrity before authorizing any deletions
+    await validateDatabaseIntegrity(backupPath);
+
+    return backupPath;
 };
 
 /**
  * Scans an existing SQLite database and identifies sessions matching verifiable automated test evidence.
  */
 export const scanForTestSessions = async (dbPath: string): Promise<TestSessionScanReport> => {
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(dbPath, { readOnly: true });
 
     try {
         const sessions = db
@@ -177,7 +253,7 @@ export const scanForTestSessions = async (dbPath: string): Promise<TestSessionSc
             }>;
             const evidence = evaluateTestEvidence(records);
 
-            if (evidence.isTest) {
+            if (evidence.isProbableTest) {
                 testSessions.push({
                     id: session.id,
                     createdAt: session.created_at,
@@ -185,6 +261,8 @@ export const scanForTestSessions = async (dbPath: string): Promise<TestSessionSc
                     reason: evidence.reason,
                     samplePrompt: evidence.samplePrompt,
                     transcriptCount: records.length,
+                    isProbable: true,
+                    deletionAuthorized: evidence.isAuthorizedForDeletion,
                 });
             }
         }
@@ -201,30 +279,10 @@ export const scanForTestSessions = async (dbPath: string): Promise<TestSessionSc
 };
 
 /**
- * Creates a timestamped backup copy of a persistent SQLite database.
- */
-export const createDatabaseBackup = async (dbPath: string): Promise<string> => {
-    const backupPath = `${dbPath}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-    await copyFile(dbPath, backupPath);
-
-    // Also copy WAL sidecar if present
-    try {
-        await copyFile(`${dbPath}-wal`, `${backupPath}-wal`);
-    } catch {
-        // WAL file may not exist
-    }
-
-    const info = await stat(backupPath);
-    if (info.size === 0) {
-        throw new Error(`Failed to create backup: backup file "${backupPath}" is empty.`);
-    }
-
-    return backupPath;
-};
-
-/**
  * Transactionally deletes the specified session IDs from SQLite, removing transcripts,
  * vector memories, context summaries, and session rows after creating a safety backup.
+ * Revalidates selected records immediately before deletion inside the transaction to prevent
+ * stale scan results from causing data loss.
  */
 export const cleanupTestSessions = async (
     dbPath: string,
@@ -238,6 +296,7 @@ export const cleanupTestSessions = async (
             deletedTranscripts: 0,
             deletedMemories: 0,
             deletedSummaries: 0,
+            skippedSessions: [],
         };
     }
 
@@ -247,13 +306,24 @@ export const cleanupTestSessions = async (
     }
 
     const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA foreign_keys = ON;");
+    db.exec("PRAGMA busy_timeout = 3000;");
 
-    db.exec("BEGIN TRANSACTION;");
+    db.exec("BEGIN IMMEDIATE;");
     try {
         let deletedMemories = 0;
         let deletedTranscripts = 0;
         let deletedSummaries = 0;
         let deletedSessions = 0;
+        const skippedSessions: string[] = [];
+
+        const sessionCheckStmt = db.prepare("SELECT id FROM sessions WHERE id = ?");
+        const transcriptStmt = db.prepare(`
+            SELECT type, payload
+            FROM transcript_items
+            WHERE session_id = ?
+            ORDER BY sequence ASC
+        `);
 
         const deleteMemoriesStmt = db.prepare("DELETE FROM memory_documents WHERE session_id = ?");
         const deleteTranscriptsStmt = db.prepare(
@@ -265,6 +335,24 @@ export const cleanupTestSessions = async (
         const deleteSessionStmt = db.prepare("DELETE FROM sessions WHERE id = ?");
 
         for (const sessionId of sessionIdsToDelete) {
+            const sessionRow = sessionCheckStmt.get(sessionId);
+            if (!sessionRow) {
+                skippedSessions.push(sessionId);
+                continue;
+            }
+
+            // Revalidate selected records immediately before deletion to prevent stale scan results
+            const records = transcriptStmt.all(sessionId) as Array<{
+                type: string;
+                payload: string;
+            }>;
+            const evidence = evaluateTestEvidence(records);
+
+            if (!evidence.isAuthorizedForDeletion) {
+                skippedSessions.push(sessionId);
+                continue;
+            }
+
             const r1 = deleteMemoriesStmt.run(sessionId);
             deletedMemories += Number(r1.changes ?? 0);
 
@@ -287,6 +375,7 @@ export const cleanupTestSessions = async (
             deletedTranscripts,
             deletedMemories,
             deletedSummaries,
+            skippedSessions,
         };
     } catch (error) {
         try {

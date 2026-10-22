@@ -318,7 +318,7 @@ test("Gemini embedding retrieval: credentials are never written to SQLite databa
     await store.close();
 });
 
-test("Gemini embedding retrieval: auto-reconciles indexing timeout to >= 15000ms for Gemini provider", async () => {
+test("Gemini embedding retrieval: auto-reconciles indexing timeout with provider overall timeout budget", async () => {
     const store = new SqliteConversationStore({ dbPath: ":memory:" });
     await store.initialize();
 
@@ -329,8 +329,8 @@ test("Gemini embedding retrieval: auto-reconciles indexing timeout to >= 15000ms
     const defaultGeminiOrchestrator = new ConversationMemoryOrchestrator(store, geminiProvider);
     assert.equal(
         defaultGeminiOrchestrator.indexingTimeoutMs,
-        17000,
-        "Gemini orchestrator default timeout must scale with provider timeout (12000 + 5000 = 17000ms)",
+        geminiProvider.overallTimeoutBudgetMs + 5000,
+        "Gemini orchestrator default timeout must coordinate with provider multi-attempt overall timeout budget",
     );
 
     const customOptionsOrchestrator = new ConversationMemoryOrchestrator(store, geminiProvider, {

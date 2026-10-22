@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GeminiEmbeddingProvider } from "../src/index.js";
+import {
+    GeminiEmbeddingProvider,
+    estimateTokensForGemini,
+} from "../src/gemini/gemini-embedding-provider.js";
 
 const create768Vector = (seed: number): number[] => {
     const vec = new Array(768);
@@ -92,7 +95,6 @@ test("GeminiEmbeddingProvider: embeds single input with 768 dimensions and x-goo
             {
                 model: "models/gemini-embedding-001",
                 content: { parts: [{ text: "test input" }] },
-                autoTruncate: true,
                 outputDimensionality: 768,
             },
         ],
@@ -188,7 +190,7 @@ test("GeminiEmbeddingProvider: input within maxInputTokens (2048) is sent untrun
 
     const sentText = capturedBody.requests[0].content.parts[0].text;
     assert.equal(sentText, normalText);
-    assert.equal(capturedBody.requests[0].autoTruncate, true);
+    assert.equal(capturedBody.requests[0].autoTruncate, undefined);
 });
 
 test("GeminiEmbeddingProvider: large input exceeding maxInputTokens bounds text preserving head and tail with explicit delimiter", async () => {
@@ -222,7 +224,8 @@ test("GeminiEmbeddingProvider: large input exceeding maxInputTokens bounds text 
         sentText.includes("[... content truncated for embedding: exceeds 2048 token limit ...]"),
         "Must include explicit truncation indicator rather than silent truncation",
     );
-    assert.equal(capturedBody.requests[0].autoTruncate, true);
+    assert.equal(capturedBody.requests[0].autoTruncate, undefined);
+    assert.ok(provider.boundInput(largeText).length <= largeText.length);
 });
 
 test("GeminiEmbeddingProvider: Unicode and multi-byte surrogate pairs are never split into lone surrogates", async () => {
@@ -549,4 +552,114 @@ test("GeminiEmbeddingProvider: immediately rejects if AbortSignal is pre-aborted
         await provider.embed(["test"], controller.signal);
     }, /The operation was aborted/);
     assert.equal(fetchCalled, false);
+});
+
+test("GeminiEmbeddingProvider: autoTruncate is included only when explicitly enabled", async () => {
+    let capturedBody: any;
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-key",
+        autoTruncate: true,
+        fetch: async (_url, init) => {
+            capturedBody = JSON.parse(init?.body as string);
+            return new Response(
+                JSON.stringify({
+                    embeddings: [{ values: create768Vector(1) }],
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+        },
+    });
+
+    await provider.embed(["test explicit autoTruncate"]);
+    assert.equal(capturedBody.requests[0].autoTruncate, true);
+});
+
+test("GeminiEmbeddingProvider: boundInput output strictly satisfies its token budget across diverse inputs", () => {
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-key",
+        maxInputTokens: 2048,
+    });
+
+    // 1. CJK characters (1.5 tokens each in estimateTokensForGemini)
+    const cjkText =
+        "这是一段非常长的中文测试文本，用于测试Gemini嵌入向量输入的截断和词元预算控制。".repeat(
+            150,
+        );
+    const estimatedCjkRaw = estimateTokensForGemini(cjkText);
+    assert.ok(estimatedCjkRaw > 2048, "Input must exceed maxInputTokens");
+    const boundedCjk = provider.boundInput(cjkText);
+    const estimatedCjkBounded = estimateTokensForGemini(boundedCjk);
+    assert.ok(
+        estimatedCjkBounded <= 2048,
+        `Bounded CJK tokens (${estimatedCjkBounded}) must not exceed 2048`,
+    );
+    assert.ok(boundedCjk.includes("这是一段非常长"));
+    assert.ok(boundedCjk.includes("词元预算控制。"));
+
+    // 2. Multi-byte Emoji surrogate pairs
+    const emojiText = "🔥🚀🌟⚡🎉💻🔍".repeat(800);
+    const estimatedEmojiRaw = estimateTokensForGemini(emojiText);
+    assert.ok(estimatedEmojiRaw > 2048, "Emoji input must exceed maxInputTokens");
+    const boundedEmoji = provider.boundInput(emojiText);
+    const estimatedEmojiBounded = estimateTokensForGemini(boundedEmoji);
+    assert.ok(
+        estimatedEmojiBounded <= 2048,
+        `Bounded Emoji tokens (${estimatedEmojiBounded}) must not exceed 2048`,
+    );
+
+    // 3. Code-heavy text with punctuation and indentations
+    const codeLines = [];
+    for (let i = 0; i < 400; i++) {
+        codeLines.push(
+            `    const result_${i} = await client.query("SELECT * FROM items WHERE id = ?", [${i}]);`,
+        );
+    }
+    const codeText = codeLines.join("\n");
+    const estimatedCodeRaw = estimateTokensForGemini(codeText);
+    assert.ok(estimatedCodeRaw > 2048, "Code input must exceed maxInputTokens");
+    const boundedCode = provider.boundInput(codeText);
+    const estimatedCodeBounded = estimateTokensForGemini(boundedCode);
+    assert.ok(
+        estimatedCodeBounded <= 2048,
+        `Bounded Code tokens (${estimatedCodeBounded}) must not exceed 2048`,
+    );
+
+    // 4. Extremely long single string without any whitespace or newlines
+    const longSingleString = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(3000); // 108,000 chars
+    const estimatedLongRaw = estimateTokensForGemini(longSingleString);
+    assert.ok(estimatedLongRaw > 2048, "Long single string must exceed maxInputTokens");
+    const boundedLong = provider.boundInput(longSingleString);
+    const estimatedLongBounded = estimateTokensForGemini(boundedLong);
+    assert.ok(
+        estimatedLongBounded <= 2048,
+        `Bounded Long string tokens (${estimatedLongBounded}) must not exceed 2048`,
+    );
+    assert.ok(boundedLong.startsWith("abcdefgh"));
+    assert.ok(boundedLong.endsWith("6789"));
+});
+
+test("GeminiEmbeddingProvider: enforces overall timeout budget across retries", async () => {
+    // Configure overallTimeoutBudgetMs smaller than per-attempt * attempts
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-key",
+        timeoutMs: 300,
+        overallTimeoutBudgetMs: 500,
+        maxRetries: 3,
+        fetch: async (_url, init) => {
+            const signal = init?.signal;
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    resolve(new Response(JSON.stringify({ embeddings: [] })));
+                }, 400);
+                signal?.addEventListener("abort", () => {
+                    clearTimeout(timer);
+                    reject(new DOMException("The operation was aborted.", "AbortError"));
+                });
+            });
+        },
+    });
+
+    await assert.rejects(async () => {
+        await provider.embed(["test"]);
+    }, /overall timeout budget/);
 });

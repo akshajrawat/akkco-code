@@ -14,6 +14,7 @@ export {
     scanForTestSessions,
     cleanupTestSessions,
     createDatabaseBackup,
+    validateDatabaseIntegrity,
     type IdentifiedTestSession,
     type TestSessionScanReport,
     type CleanupResult,
