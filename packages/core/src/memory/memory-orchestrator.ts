@@ -91,6 +91,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                 const [embedding] = await embeddingProvider.embed(
                     [derivedDoc.content],
                     controller.signal,
+                    { taskType: "RETRIEVAL_DOCUMENT" },
                 );
                 if (!embedding || embedding.length === 0 || controller.signal.aborted) {
                     return;

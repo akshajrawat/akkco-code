@@ -1,4 +1,4 @@
-import { createAkkcoRuntime, Session } from "@akkco/core";
+import { createAkkcoRuntime, Session, type TranscriptItem } from "@akkco/core";
 import { toModelTools } from "@akkco/tools";
 import {
     type CommandContext,
@@ -22,11 +22,14 @@ export const createCliController = ({
     commandRegistry = createBuiltinCommandRegistry(),
     reliabilityOptions,
     compiler,
+    createCompiler,
     persistence,
     sessionId,
     profile,
     compactor,
     budget,
+    store,
+    metadata,
 }: CliControllerOptions) => {
     let state: CliViewState = {
         history: [],
@@ -95,11 +98,17 @@ export const createCliController = ({
         });
     };
 
-    const createSessionInstance = (id?: string) =>
-        new Session(
-            createAkkcoRuntime(
-                provider,
-                {
+    const createSessionInstance = (
+        id?: string,
+        transcript: TranscriptItem[] = [],
+        initialSequence?: number,
+    ) => {
+        const targetId = id ?? crypto.randomUUID();
+        const targetCompiler = createCompiler ? createCompiler(targetId) : compiler;
+
+        return new Session(
+            createAkkcoRuntime(provider, {
+                toolHost: {
                     get tools() {
                         return toModelTools(toolRegistry.list());
                     },
@@ -111,17 +120,40 @@ export const createCliController = ({
                 reliabilityOptions,
                 budget,
                 compactor,
-            ),
-            [],
+                profile,
+            }),
+            transcript,
             {
-                id: id ?? crypto.randomUUID(),
-                compiler,
+                id: targetId,
+                compiler: targetCompiler,
                 persistence,
                 profile,
+                initialSequence,
             },
         );
+    };
 
     let session = createSessionInstance(sessionId);
+
+    const unsubscribeCompactor = compactor?.onProgress?.((event) => {
+        if (event.type === "start") {
+            update({
+                compaction: {
+                    active: true,
+                    scope: event.scope,
+                    toolName: event.scope === "tool" ? event.toolName : undefined,
+                },
+            });
+        } else if (event.type === "success") {
+            update({ compaction: undefined });
+            notice("✓ Context compacted. Continuing...");
+        } else if (event.type === "fallback") {
+            update({ compaction: undefined });
+            notice("⚠ Compaction unavailable; using safe context fallback.", "warning");
+        } else if (event.type === "cancel") {
+            update({ compaction: undefined });
+        }
+    });
 
     const exit = (farewell = true) => {
         if (state.exited) {
@@ -136,12 +168,12 @@ export const createCliController = ({
             notice("Goodbye.");
         }
 
-        update({ exited: true, assistantText: "", activeTool: undefined });
+        update({ exited: true, assistantText: "", activeTool: undefined, compaction: undefined });
         emit({ type: "exit" });
     };
 
     const interrupt = () => {
-        update({ queuedPrompts: [] });
+        update({ queuedPrompts: [], compaction: undefined });
         if (activeAbort) {
             activeAbort.abort();
             update({ outcome: "cancelled" });
@@ -150,13 +182,68 @@ export const createCliController = ({
         }
     };
 
+    const restoreSession = (
+        resumedId: string,
+        transcript: TranscriptItem[],
+        nextSequence: number,
+    ) => {
+        const restoredHistory: HistoryItem[] = [];
+        for (const item of transcript) {
+            if (item.type === "user") {
+                restoredHistory.push({
+                    id: nextId++,
+                    type: "message",
+                    role: "user",
+                    content: item.content,
+                });
+            } else if (item.type === "assistant") {
+                restoredHistory.push({
+                    id: nextId++,
+                    type: "message",
+                    role: "assistant",
+                    content: item.content,
+                });
+            } else if (item.type === "tool_execution") {
+                restoredHistory.push({
+                    id: nextId++,
+                    type: "tool",
+                    execution: {
+                        toolName: item.toolName,
+                        arguments: item.arguments,
+                        result: item.result,
+                        error: item.error,
+                        status: item.status,
+                        durationMs: item.durationMs,
+                    },
+                });
+            }
+        }
+
+        session = createSessionInstance(resumedId, transcript, nextSequence);
+        update({
+            history: restoredHistory,
+            historyVersion: state.historyVersion + 1,
+            assistantText: "",
+            activeTool: undefined,
+            compaction: undefined,
+            outcome: undefined,
+        });
+        emit({ type: "idle" });
+    };
+
     const commandContext: CommandContext = {
         get session() {
             return session;
         },
+        get isBusy() {
+            return session.isRunning;
+        },
+        store,
+        metadata,
         resetSession: () => {
             session = createSessionInstance();
         },
+        restoreSession,
         toolRegistry,
 
         appendHistory: (item) => {
@@ -272,7 +359,12 @@ export const createCliController = ({
             } finally {
                 activeAbort = undefined;
                 const [nextPrompt, ...remaining] = state.queuedPrompts ?? [];
-                update({ status: "idle", activeTool: undefined, queuedPrompts: remaining });
+                update({
+                    status: "idle",
+                    activeTool: undefined,
+                    compaction: undefined,
+                    queuedPrompts: remaining,
+                });
 
                 if (!state.exited) {
                     if (nextPrompt !== undefined) {
@@ -323,6 +415,7 @@ export const createCliController = ({
 
         dispose: async () => {
             exit(false);
+            unsubscribeCompactor?.();
             if (activeTurnPromise) {
                 try {
                     await activeTurnPromise;

@@ -1,12 +1,16 @@
-import type { Session } from "@akkco/core";
+import type { Session, TranscriptItem } from "@akkco/core";
+import type { ConversationStore } from "@akkco/retrieval";
 import type { ToolRegistry } from "@akkco/tools";
-import type { HistoryItemPayload, ToolExecutionState } from "../state/types.js";
+import type { CliMetadata, HistoryItemPayload, ToolExecutionState } from "../state/types.js";
 import { sessionCommands } from "./session-commands.js";
 import { toolCommands } from "./tool-commands.js";
 
 export interface CommandContext {
     readonly session: Session;
     readonly toolRegistry: ToolRegistry;
+    readonly store?: ConversationStore;
+    readonly metadata?: CliMetadata;
+    readonly isBusy?: boolean;
     appendHistory: (item: HistoryItemPayload) => void;
     notice: (content: string, kind?: "info" | "error" | "warning") => void;
     exit: (farewell?: boolean) => void;
@@ -14,6 +18,11 @@ export interface CommandContext {
     startTool: (toolName: string, input: unknown) => void;
     finishTool: (execution: ToolExecutionState) => void;
     resetSession?: () => void;
+    restoreSession?: (
+        sessionId: string,
+        transcript: TranscriptItem[],
+        nextSequence: number,
+    ) => void;
 }
 
 export type CliCommand = {

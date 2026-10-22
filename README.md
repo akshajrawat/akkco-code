@@ -46,6 +46,12 @@ Environment variables can be configured to customize runtime behavior:
 - `AKKCO_API_KEY`: API key if required by the target provider.
 - `AKKCO_TOOL_MODE`: Tool execution mode (`compatibility` [default] or `native`).
 - `AKKCO_MAX_TOOL_ITERATIONS`: Maximum tool loop iterations per turn (default: `25`).
+- `AKKCO_EMBEDDING_PROVIDER`: Embedding provider (`gemini` for Google Gemini, or `openai-compatible` for local Ollama/Nomic).
+- `AKKCO_EMBEDDING_MODEL`: Embedding model name (default: `gemini-embedding-001` when provider is `gemini`, or `nomic-embed-text` for local).
+- `AKKCO_EMBEDDING_DIMENSIONS`: Embedding output dimensionality (default: `768`).
+- `GEMINI_API_KEY`: Google Gemini API key (required when `AKKCO_EMBEDDING_PROVIDER=gemini`).
+
+For full setup, privacy details, and re-embedding workflows, see [docs/gemini-embeddings.md](file:///home/aksha/akkco-code/docs/gemini-embeddings.md).
 
 ---
 

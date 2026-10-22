@@ -31,6 +31,7 @@ export interface CompactHistoryOptions {
         readonly endSequence: number;
         readonly items: readonly ModelItem[];
     }[];
+    readonly onProgress?: CompactionProgressListener;
 }
 
 export interface CompactToolResultOptions {
@@ -39,7 +40,19 @@ export interface CompactToolResultOptions {
     readonly content: string;
     readonly targetTokens: number;
     readonly signal?: AbortSignal;
+    readonly onProgress?: CompactionProgressListener;
 }
+
+export type CompactionProgressEvent =
+    | { readonly type: "start"; readonly scope: "history" }
+    | { readonly type: "start"; readonly scope: "tool"; readonly toolName: string }
+    | { readonly type: "success"; readonly scope: "history" }
+    | { readonly type: "success"; readonly scope: "tool"; readonly toolName: string }
+    | { readonly type: "fallback"; readonly scope: "history" }
+    | { readonly type: "fallback"; readonly scope: "tool"; readonly toolName: string }
+    | { readonly type: "cancel"; readonly scope: "history" | "tool"; readonly toolName?: string };
+
+export type CompactionProgressListener = (event: CompactionProgressEvent) => void;
 
 export interface ContextCompactorOptions {
     readonly provider: ModelProvider;
@@ -47,11 +60,13 @@ export interface ContextCompactorOptions {
     readonly store?: ConversationStore;
     readonly maxSummaryTokens?: number;
     readonly charsPerToken?: number;
+    readonly onProgress?: CompactionProgressListener;
 }
 
 export interface ContextCompactor {
     compactHistory(options: CompactHistoryOptions): Promise<StructuredSummary | null>;
     compactToolResult(options: CompactToolResultOptions): Promise<string | null>;
+    onProgress?(listener: CompactionProgressListener): () => void;
 }
 
 /**
@@ -223,6 +238,7 @@ export class DefaultContextCompactor implements ContextCompactor {
     private readonly store?: ConversationStore;
     private readonly maxSummaryTokens: number;
     private readonly charsPerToken: number;
+    private readonly progressListeners = new Set<CompactionProgressListener>();
 
     constructor(options: ContextCompactorOptions) {
         this.profile = options.profile;
@@ -230,7 +246,31 @@ export class DefaultContextCompactor implements ContextCompactor {
         this.store = options.store;
         this.maxSummaryTokens = options.maxSummaryTokens ?? 1000;
         this.charsPerToken = options.charsPerToken ?? options.profile?.charsPerToken ?? 4;
+        if (options.onProgress) {
+            this.progressListeners.add(options.onProgress);
+        }
     }
+
+    onProgress = (listener: CompactionProgressListener): (() => void) => {
+        this.progressListeners.add(listener);
+        return () => {
+            this.progressListeners.delete(listener);
+        };
+    };
+
+    private emitProgress = (
+        perCallListener: CompactionProgressListener | undefined,
+        event: CompactionProgressEvent,
+    ): void => {
+        try {
+            perCallListener?.(event);
+        } catch {}
+        for (const listener of this.progressListeners) {
+            try {
+                listener(event);
+            } catch {}
+        }
+    };
 
     private executeCompactorPrompt = async (
         items: ModelItem[],
@@ -452,119 +492,144 @@ export class DefaultContextCompactor implements ContextCompactor {
             return null;
         }
 
-        for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
-            if (options.signal?.aborted) {
-                throw new DOMException("The operation was aborted.", "AbortError");
-            }
+        this.emitProgress(options.onProgress, { type: "start", scope: "history" });
 
-            const chunkItems = chunks[chunkIdx];
-            const serializedChunk = this.serializeHistoryItems(chunkItems);
+        try {
+            for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+                if (options.signal?.aborted) {
+                    this.emitProgress(options.onProgress, { type: "cancel", scope: "history" });
+                    throw new DOMException("The operation was aborted.", "AbortError");
+                }
 
-            let userContent = "";
-            let promptFraming = "";
-            if (currentSummary) {
-                promptFraming =
-                    `--- PREVIOUS VALIDATED CONTEXT SUMMARY (sequences ${currentSummary.sourceRange.startSequence} to ${currentSummary.sourceRange.endSequence}) ---\n` +
-                    JSON.stringify(currentSummary) +
-                    `\n\n--- NEW CONVERSATION TURNS TO INCORPORATE ---\n`;
-                userContent = `${promptFraming}${serializedChunk}`;
-            } else {
-                promptFraming = `--- CONVERSATION HISTORY TO SUMMARIZE ---\n`;
-                userContent = `${promptFraming}${serializedChunk}`;
-            }
+                const chunkItems = chunks[chunkIdx];
+                const serializedChunk = this.serializeHistoryItems(chunkItems);
 
-            const systemItem: ModelItem = {
-                type: "message",
-                role: "system",
-                content: instructions,
-            };
-            const userItem: ModelItem = { type: "message", role: "user", content: userContent };
-            const totalTokens =
-                estimateModelItemTokens(systemItem, this.charsPerToken) +
-                estimateModelItemTokens(userItem, this.charsPerToken);
+                let userContent = "";
+                let promptFraming = "";
+                if (currentSummary) {
+                    promptFraming =
+                        `--- PREVIOUS VALIDATED CONTEXT SUMMARY (sequences ${currentSummary.sourceRange.startSequence} to ${currentSummary.sourceRange.endSequence}) ---\n` +
+                        JSON.stringify(currentSummary) +
+                        `\n\n--- NEW CONVERSATION TURNS TO INCORPORATE ---\n`;
+                    userContent = `${promptFraming}${serializedChunk}`;
+                } else {
+                    promptFraming = `--- CONVERSATION HISTORY TO SUMMARIZE ---\n`;
+                    userContent = `${promptFraming}${serializedChunk}`;
+                }
 
-            if (totalTokens > compactorCapacity) {
-                return null;
-            }
+                const systemItem: ModelItem = {
+                    type: "message",
+                    role: "system",
+                    content: instructions,
+                };
+                const userItem: ModelItem = { type: "message", role: "user", content: userContent };
+                const totalTokens =
+                    estimateModelItemTokens(systemItem, this.charsPerToken) +
+                    estimateModelItemTokens(userItem, this.charsPerToken);
 
-            const responseText = await this.executeCompactorPrompt(
-                [
-                    { type: "message", role: "system", content: instructions },
-                    { type: "message", role: "user", content: userContent },
-                ],
-                options.signal,
-            );
+                if (totalTokens > compactorCapacity) {
+                    this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
+                    return null;
+                }
 
-            if (!responseText) {
-                return null;
-            }
-
-            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                return null;
-            }
-
-            let parsed: Record<string, unknown>;
-            try {
-                parsed = JSON.parse(jsonMatch[0]);
-            } catch {
-                return null;
-            }
-
-            parsed.sourceRange = {
-                sessionId: options.sessionId,
-                startSequence: options.startSequence,
-                endSequence:
-                    chunkIdx === chunks.length - 1
-                        ? options.endSequence
-                        : candidateStartSequence + chunkIdx,
-            };
-
-            let validatedChunkSummary: StructuredSummary;
-            try {
-                validatedChunkSummary = validateStructuredSummary(
-                    parsed,
-                    this.maxSummaryTokens,
-                    this.charsPerToken,
+                const responseText = await this.executeCompactorPrompt(
+                    [
+                        { type: "message", role: "system", content: instructions },
+                        { type: "message", role: "user", content: userContent },
+                    ],
+                    options.signal,
                 );
-            } catch {
+
+                if (!responseText) {
+                    this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
+                    return null;
+                }
+
+                const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) {
+                    this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
+                    return null;
+                }
+
+                let parsed: Record<string, unknown>;
+                try {
+                    parsed = JSON.parse(jsonMatch[0]);
+                } catch {
+                    this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
+                    return null;
+                }
+
+                parsed.sourceRange = {
+                    sessionId: options.sessionId,
+                    startSequence: options.startSequence,
+                    endSequence:
+                        chunkIdx === chunks.length - 1
+                            ? options.endSequence
+                            : candidateStartSequence + chunkIdx,
+                };
+
+                let validatedChunkSummary: StructuredSummary;
+                try {
+                    validatedChunkSummary = validateStructuredSummary(
+                        parsed,
+                        this.maxSummaryTokens,
+                        this.charsPerToken,
+                    );
+                } catch {
+                    this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
+                    return null;
+                }
+
+                currentSummary = validatedChunkSummary;
+            }
+
+            if (!currentSummary) {
+                this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
                 return null;
             }
 
-            currentSummary = validatedChunkSummary;
-        }
-
-        if (!currentSummary) {
-            return null;
-        }
-
-        const finalSummary: StructuredSummary = {
-            ...currentSummary,
-            sourceRange: {
-                sessionId: options.sessionId,
-                startSequence: options.startSequence,
-                endSequence: options.endSequence,
-            },
-        };
-
-        // Persist validated summary to SQLite (and automatically prune superseded prefix summaries)
-        if (this.store && options.sessionId) {
-            try {
-                const formattedItem = formatSummaryAsModelItem(finalSummary);
-                const estimatedTokens = estimateModelItemTokens(formattedItem, this.charsPerToken);
-                await this.store.saveContextSummary({
+            const finalSummary: StructuredSummary = {
+                ...currentSummary,
+                sourceRange: {
                     sessionId: options.sessionId,
                     startSequence: options.startSequence,
                     endSequence: options.endSequence,
-                    summaryJson: JSON.stringify(finalSummary),
-                    estimatedTokens,
-                });
-            } catch {
-                // Persistence failure must not abort an otherwise successful in-memory compaction
-            }
-        }
+                },
+            };
 
-        return finalSummary;
+            // Persist validated summary to SQLite (and automatically prune superseded prefix summaries)
+            if (this.store && options.sessionId) {
+                try {
+                    const formattedItem = formatSummaryAsModelItem(finalSummary);
+                    const estimatedTokens = estimateModelItemTokens(
+                        formattedItem,
+                        this.charsPerToken,
+                    );
+                    await this.store.saveContextSummary({
+                        sessionId: options.sessionId,
+                        startSequence: options.startSequence,
+                        endSequence: options.endSequence,
+                        summaryJson: JSON.stringify(finalSummary),
+                        estimatedTokens,
+                    });
+                } catch {
+                    // Persistence failure must not abort an otherwise successful in-memory compaction
+                }
+            }
+
+            this.emitProgress(options.onProgress, { type: "success", scope: "history" });
+            return finalSummary;
+        } catch (error) {
+            if (
+                options.signal?.aborted ||
+                (error instanceof Error && error.name === "AbortError")
+            ) {
+                this.emitProgress(options.onProgress, { type: "cancel", scope: "history" });
+                throw error;
+            }
+            this.emitProgress(options.onProgress, { type: "fallback", scope: "history" });
+            return null;
+        }
     };
 
     compactToolResult = async (options: CompactToolResultOptions): Promise<string | null> => {
@@ -602,126 +667,203 @@ export class DefaultContextCompactor implements ContextCompactor {
 
         const contentTokens = estimateTokens(options.content, this.charsPerToken);
 
-        let summaryBody: string | null = null;
+        this.emitProgress(options.onProgress, {
+            type: "start",
+            scope: "tool",
+            toolName: options.toolName,
+        });
 
-        if (contentTokens <= availableSingleContentTokens) {
-            const promptText = `${singlePromptIntro}${options.content}`;
-            const response = await this.executeCompactorPrompt(
-                [{ type: "message", role: "user", content: promptText }],
-                options.signal,
-            );
+        try {
+            let summaryBody: string | null = null;
 
-            if (!response) {
-                return null;
-            }
-            summaryBody = response.trim();
-        } else {
-            const chunkPromptIntro = (idx: number, total: number, target: number) =>
-                `Extract key findings, file paths, line numbers, error messages, and omissions from part ${idx}/${total} of tool "${options.toolName}" output within ${target} tokens:\n\n`;
-
-            const maxChunkPromptFraming =
-                estimateTokens(chunkPromptIntro(99, 99, targetBodyTokens), this.charsPerToken) + 16;
-            const availableToolChunkTokens = compactorCapacity - maxChunkPromptFraming;
-
-            if (availableToolChunkTokens < MIN_PRACTICAL_CHUNK_TOKENS) {
-                return null;
-            }
-
-            const maxLineChars = Math.max(1, availableToolChunkTokens * this.charsPerToken);
-            const lines = options.content.split("\n");
-            const lineSlices: string[] = [];
-
-            for (const line of lines) {
-                const lineTokens = estimateTokens(line, this.charsPerToken) + 1;
-                if (lineTokens > availableToolChunkTokens) {
-                    for (let i = 0; i < line.length; i += maxLineChars) {
-                        lineSlices.push(line.slice(i, i + maxLineChars));
-                    }
-                } else {
-                    lineSlices.push(line);
-                }
-            }
-
-            const chunks: string[] = [];
-            let currentLines: string[] = [];
-            let currentTokens = 0;
-
-            for (const slice of lineSlices) {
-                const sliceTokens = estimateTokens(slice, this.charsPerToken) + 1;
-                if (
-                    currentLines.length > 0 &&
-                    currentTokens + sliceTokens > availableToolChunkTokens
-                ) {
-                    chunks.push(currentLines.join("\n"));
-                    currentLines = [slice];
-                    currentTokens = sliceTokens;
-                } else {
-                    currentLines.push(slice);
-                    currentTokens += sliceTokens;
-                }
-            }
-            if (currentLines.length > 0) {
-                chunks.push(currentLines.join("\n"));
-            }
-
-            if (chunks.length > MAX_COMPACTION_CHUNKS) {
-                return null;
-            }
-
-            const partialSummaries: string[] = [];
-            for (let i = 0; i < chunks.length; i++) {
-                if (options.signal?.aborted) {
-                    throw new DOMException("The operation was aborted.", "AbortError");
-                }
-                const targetTokensForPart = Math.max(
-                    10,
-                    Math.floor(targetBodyTokens / chunks.length),
-                );
-                const chunkPrompt = `${chunkPromptIntro(i + 1, chunks.length, targetTokensForPart)}${chunks[i]}`;
-
-                const partial = await this.executeCompactorPrompt(
-                    [{ type: "message", role: "user", content: chunkPrompt }],
+            if (contentTokens <= availableSingleContentTokens) {
+                const promptText = `${singlePromptIntro}${options.content}`;
+                const response = await this.executeCompactorPrompt(
+                    [{ type: "message", role: "user", content: promptText }],
                     options.signal,
                 );
 
-                if (!partial) {
+                if (!response) {
+                    this.emitProgress(options.onProgress, {
+                        type: "fallback",
+                        scope: "tool",
+                        toolName: options.toolName,
+                    });
                     return null;
                 }
-                partialSummaries.push(partial.trim());
+                summaryBody = response.trim();
+            } else {
+                const chunkPromptIntro = (idx: number, total: number, target: number) =>
+                    `Extract key findings, file paths, line numbers, error messages, and omissions from part ${idx}/${total} of tool "${options.toolName}" output within ${target} tokens:\n\n`;
+
+                const maxChunkPromptFraming =
+                    estimateTokens(chunkPromptIntro(99, 99, targetBodyTokens), this.charsPerToken) +
+                    16;
+                const availableToolChunkTokens = compactorCapacity - maxChunkPromptFraming;
+
+                if (availableToolChunkTokens < MIN_PRACTICAL_CHUNK_TOKENS) {
+                    this.emitProgress(options.onProgress, {
+                        type: "fallback",
+                        scope: "tool",
+                        toolName: options.toolName,
+                    });
+                    return null;
+                }
+
+                const maxLineChars = Math.max(1, availableToolChunkTokens * this.charsPerToken);
+                const lines = options.content.split("\n");
+                const lineSlices: string[] = [];
+
+                for (const line of lines) {
+                    const lineTokens = estimateTokens(line, this.charsPerToken) + 1;
+                    if (lineTokens > availableToolChunkTokens) {
+                        for (let i = 0; i < line.length; i += maxLineChars) {
+                            lineSlices.push(line.slice(i, i + maxLineChars));
+                        }
+                    } else {
+                        lineSlices.push(line);
+                    }
+                }
+
+                const chunks: string[] = [];
+                let currentLines: string[] = [];
+                let currentTokens = 0;
+
+                for (const slice of lineSlices) {
+                    const sliceTokens = estimateTokens(slice, this.charsPerToken) + 1;
+                    if (
+                        currentLines.length > 0 &&
+                        currentTokens + sliceTokens > availableToolChunkTokens
+                    ) {
+                        chunks.push(currentLines.join("\n"));
+                        currentLines = [slice];
+                        currentTokens = sliceTokens;
+                    } else {
+                        currentLines.push(slice);
+                        currentTokens += sliceTokens;
+                    }
+                }
+                if (currentLines.length > 0) {
+                    chunks.push(currentLines.join("\n"));
+                }
+
+                if (chunks.length > MAX_COMPACTION_CHUNKS) {
+                    this.emitProgress(options.onProgress, {
+                        type: "fallback",
+                        scope: "tool",
+                        toolName: options.toolName,
+                    });
+                    return null;
+                }
+
+                const partialSummaries: string[] = [];
+                for (let i = 0; i < chunks.length; i++) {
+                    if (options.signal?.aborted) {
+                        this.emitProgress(options.onProgress, {
+                            type: "cancel",
+                            scope: "tool",
+                            toolName: options.toolName,
+                        });
+                        throw new DOMException("The operation was aborted.", "AbortError");
+                    }
+                    const targetTokensForPart = Math.max(
+                        10,
+                        Math.floor(targetBodyTokens / chunks.length),
+                    );
+                    const chunkPrompt = `${chunkPromptIntro(i + 1, chunks.length, targetTokensForPart)}${chunks[i]}`;
+
+                    const partial = await this.executeCompactorPrompt(
+                        [{ type: "message", role: "user", content: chunkPrompt }],
+                        options.signal,
+                    );
+
+                    if (!partial) {
+                        this.emitProgress(options.onProgress, {
+                            type: "fallback",
+                            scope: "tool",
+                            toolName: options.toolName,
+                        });
+                        return null;
+                    }
+                    partialSummaries.push(partial.trim());
+                }
+
+                const mergePrompt =
+                    `Consolidate the following partial summaries for tool "${options.toolName}" (call ID: "${options.callId}") into a single concise summary within ${targetBodyTokens} tokens.\n` +
+                    `Preserve file paths, line numbers, error codes, and explicit omissions.\n\n` +
+                    partialSummaries.join("\n\n");
+
+                if (estimateTokens(mergePrompt, this.charsPerToken) + 16 > compactorCapacity) {
+                    this.emitProgress(options.onProgress, {
+                        type: "fallback",
+                        scope: "tool",
+                        toolName: options.toolName,
+                    });
+                    return null;
+                }
+
+                const merged = await this.executeCompactorPrompt(
+                    [{ type: "message", role: "user", content: mergePrompt }],
+                    options.signal,
+                );
+
+                if (!merged) {
+                    this.emitProgress(options.onProgress, {
+                        type: "fallback",
+                        scope: "tool",
+                        toolName: options.toolName,
+                    });
+                    return null;
+                }
+                summaryBody = merged.trim();
             }
 
-            const mergePrompt =
-                `Consolidate the following partial summaries for tool "${options.toolName}" (call ID: "${options.callId}") into a single concise summary within ${targetBodyTokens} tokens.\n` +
-                `Preserve file paths, line numbers, error codes, and explicit omissions.\n\n` +
-                partialSummaries.join("\n\n");
-
-            if (estimateTokens(mergePrompt, this.charsPerToken) + 16 > compactorCapacity) {
+            if (!summaryBody || summaryBody.length === 0) {
+                this.emitProgress(options.onProgress, {
+                    type: "fallback",
+                    scope: "tool",
+                    toolName: options.toolName,
+                });
                 return null;
             }
 
-            const merged = await this.executeCompactorPrompt(
-                [{ type: "message", role: "user", content: mergePrompt }],
-                options.signal,
-            );
+            const formatted = makeFormatted(summaryBody);
+            const totalEstimated = estimateTokens(formatted, this.charsPerToken) + 4;
 
-            if (!merged) {
+            if (totalEstimated > options.targetTokens) {
+                this.emitProgress(options.onProgress, {
+                    type: "fallback",
+                    scope: "tool",
+                    toolName: options.toolName,
+                });
                 return null;
             }
-            summaryBody = merged.trim();
-        }
 
-        if (!summaryBody || summaryBody.length === 0) {
+            this.emitProgress(options.onProgress, {
+                type: "success",
+                scope: "tool",
+                toolName: options.toolName,
+            });
+            return formatted;
+        } catch (error) {
+            if (
+                options.signal?.aborted ||
+                (error instanceof Error && error.name === "AbortError")
+            ) {
+                this.emitProgress(options.onProgress, {
+                    type: "cancel",
+                    scope: "tool",
+                    toolName: options.toolName,
+                });
+                throw error;
+            }
+            this.emitProgress(options.onProgress, {
+                type: "fallback",
+                scope: "tool",
+                toolName: options.toolName,
+            });
             return null;
         }
-
-        const formatted = makeFormatted(summaryBody);
-        const totalEstimated = estimateTokens(formatted, this.charsPerToken) + 4;
-
-        if (totalEstimated > options.targetTokens) {
-            return null;
-        }
-
-        return formatted;
     };
 }
 

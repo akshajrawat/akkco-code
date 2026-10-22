@@ -97,7 +97,7 @@ export const toolArgumentSummary = (execution: ToolExecutionState) => {
 export const toolOutcome = (execution: ToolExecutionState) => {
     const duration = execution.durationMs === undefined ? "" : ` · ${execution.durationMs}ms`;
 
-    if (execution.status === "running") {
+    if (execution.status === "running" || execution.status === "requested") {
         return "◌ running...";
     }
 
@@ -202,6 +202,13 @@ export const visibleConversation = (lines: ConversationLine[], height: number, o
 export const uiStatus = (state: CliViewState) => {
     if (state.outcome === "cancelled") {
         return "Cancelled";
+    }
+
+    if (state.compaction?.active) {
+        if (state.compaction.scope === "history") {
+            return "Compacting conversation history...";
+        }
+        return `Compacting ${state.compaction.toolName ?? "tool"} output...`;
     }
 
     if (state.status === "tool") {

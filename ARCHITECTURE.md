@@ -18,7 +18,7 @@ akkco-code/
 
 3. `packages/models` : Reorganized under `contracts/` (`items`, `tools`, `request`, `events`, `provider`, `embedding`, `profile`) and `testing/`. Defines provider-neutral `ModelItem` (`ModelMessage`, `ModelToolCall`, `ModelToolResult`), `ModelTool`, `ModelRequest`, `ModelEvent`, `ModelProvider`, `EmbeddingProvider`, `EmbeddingIdentity`, and `ModelProfile`. Provides profile resolution (`resolveModelProfile`) and validation (`validateModelProfile`) with conservative local presets (Qwen 2.5 Coder, Llama 3) and override hierarchies. In `testing/`, provides `FakeModelProvider` and deterministic offline `DeterministicFakeEmbeddingProvider` for reproducible ranking and similarity testing without randomness.
 
-4. `packages/providers` : Implements concrete providers connecting to model and embedding APIs using the common contracts. Under `openai-compatible/`, provides `OpenAICompatibleProvider` for chat completions (with `max_tokens` mapping and deterministic tool ordering) and `OpenAICompatibleEmbeddingProvider` for `/embeddings`. Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`) featuring deterministic tool ordering, compact schemas, and authoritative preflight preparation on initial, tool-loop, and repair requests. Public API boundary is `packages/providers/src/index.ts`.
+4. `packages/providers` : Implements concrete providers connecting to model and embedding APIs using the common contracts. Under `openai-compatible/`, provides `OpenAICompatibleProvider` for chat completions (with `max_tokens` mapping and deterministic tool ordering) and `OpenAICompatibleEmbeddingProvider` for `/embeddings`. Under `gemini/`, provides `GeminiEmbeddingProvider` for Google's Gemini Embedding API (`gemini-embedding-001`) with configurable Matryoshka output dimensionality (default 768), batching ($\le 100$), bounded exponential backoff retries, task-type specialization (`RETRIEVAL_DOCUMENT` and `RETRIEVAL_QUERY`), and strict credential redaction. Under `compatibility/`, implements textual tool-calling compatibility (`text-tool-protocol.ts`, `text-tool-provider.ts`) featuring deterministic tool ordering, compact schemas, and authoritative preflight preparation on initial, tool-loop, and repair requests. Public API boundary is `packages/providers/src/index.ts`.
 
 5. `packages/retrieval` : Manages SQLite-backed local persistence using Node.js built-in `node:sqlite` (`DatabaseSync`). Houses schema versioning (`schema_migrations`, `sessions`, `transcript_items`, `memory_documents`), vector BLOB serialization/deserialization with Float32Array precision, cosine similarity search primitives, and the `ConversationStore` / `SqliteConversationStore` implementation. Public API boundary is `packages/retrieval/src/index.ts`.
 
@@ -113,9 +113,16 @@ CLI configuration and environment variable parsing live strictly in the composit
 The controller in `state/cli-controller.ts` coordinates a `Session`, the command subsystem, an active generation's `AbortController`, and CLI presentation state. Slash-command handling is factored out into a dedicated subsystem under `commands/`:
 
 - `commands/command-registry.ts`: defines `CliCommand`, `CommandContext`, and `CommandRegistry` (`createBuiltinCommandRegistry`). It parses slash inputs, extracts the command name and arguments, and dispatches them. Inputs starting with `/` that do not match a known command emit an "Unknown command" notice and are never forwarded to the model; inputs without a leading `/` are passed to `Session.send()`.
-- `commands/session-commands.ts`: houses the `/exit` and `/clear` command handlers.
+- `commands/session-commands.ts`: houses the `/exit`, `/clear`, `/session`, `/sessions`, and `/resume <session-id>` command handlers.
 - `commands/tool-commands.ts`: houses `/tools` and manual `/tool <name> [json]` invocation.
-- `CommandContext`: exposes a minimal capability boundary (`session`, `tools`, `appendHistory`, `notice`, `exit`, `startToolExecution`, `finishToolExecution`, `isCancelled`) so commands cannot directly mutate arbitrary controller state.
+- `CommandContext`: exposes a minimal capability boundary (`session`, `tools`, `appendHistory`, `notice`, `exit`, `startToolExecution`, `finishToolExecution`, `isCancelled`, `switchSession`, `restoreSession`, `listSessions`) so commands cannot directly mutate arbitrary controller state.
+
+Session management commands provide safe local navigation across persisted conversations:
+
+- `/session`: Displays active session ID, transcript item count, effective context window, and tool mode without performing LLM inference.
+- `/sessions`: Queries SQLite for recent persisted sessions (newest first) and prints a tabular summary with short session IDs, human-readable relative update timestamps, transcript item counts, and previews of the last user prompt.
+- `/resume <session-id>`: Restores an existing session by exact UUID or unambiguous short prefix. Checks idle state (`!session.isRunning`), validates session existence in SQLite, loads canonical transcript records strictly ordered by sequence, validates item payloads, restores `initialSequence = maxPersistedSequence + 1`, reconstructs view history without re-inserting records into SQLite, and rebinds `BoundedContextCompiler` to the resumed session ID. Fails closed with descriptive user notices if the prefix is ambiguous, the session is missing, or stored records are corrupt, leaving the active session untouched.
+- `/clear`: Starts a genuinely fresh session with a new UUID and re-bound Context Compiler while leaving all historical sessions intact and recoverable in SQLite.
 
 Its tool-host wrapper reports running-tool state before executing the existing registry; unchanged `RuntimeEvent` outcomes complete the presentation. Assistant segments are committed before tool outcomes. React subscribes through `use-cli-controller.ts`, while the plain renderer consumes incremental presentation events. Cancellation and error outcomes belong only to UI state.
 
@@ -165,9 +172,9 @@ To test the real interactive TUI end-to-end without mocking React or terminal I/
 
 ### Package Boundaries & Dependency Inversion
 
-- `@akkco/models`: defines provider-neutral `EmbeddingProvider` (`id`, `model`, `embed(inputs, signal): Promise<number[][]>`) and `EmbeddingIdentity` (`provider`, `model`, `dimensions`). Also provides `DeterministicFakeEmbeddingProvider` in `@akkco/models/testing` for deterministic test fixtures with zero randomness.
-- `@akkco/providers`: implements `OpenAICompatibleEmbeddingProvider` connecting to standard `/embeddings` endpoints with batch ordering, non-finite value validation, consistent dimension checks, and `AbortSignal` cancellation.
-- `@akkco/retrieval`: persistence layer using Node.js built-in `node:sqlite` (`DatabaseSync`), providing an async domain contract (`ConversationStore`, `SqliteConversationStore`) without leaking raw SQLite row types. Manages versioned SQL-file migrations (`packages/retrieval/migrations/0001_initial.sql`), single connection handle per instance with shared in-flight `initialize()` deduplication, multi-process write locking (`BEGIN IMMEDIATE` with `PRAGMA busy_timeout = 3000;` and exponential jitter backoff), strict foreign key enforcement (`PRAGMA foreign_keys = ON;`), SHA-256 checksum validation, vector BLOB serialization with Float32 overflow checks, corrupt row isolation, and cosine similarity scanning.
+- `@akkco/models`: defines provider-neutral `EmbeddingProvider` (`id`, `model`, `dimensions`, `embed(inputs, signal, options): Promise<number[][]>`), `EmbeddingOptions` (`taskType`, `title`), and `EmbeddingIdentity` (`provider`, `model`, `dimensions`). Also provides `DeterministicFakeEmbeddingProvider` in `@akkco/models/testing` for deterministic test fixtures with zero randomness.
+- `@akkco/providers`: implements concrete model and embedding providers: `OpenAICompatibleProvider` for LLM inference, `OpenAICompatibleEmbeddingProvider` connecting to standard `/embeddings` endpoints, and `GeminiEmbeddingProvider` connecting to Google's Gemini Embedding API with Matryoshka output dimensionality (default 768), input chunking ($\le 100$), bounded retries, task-type assignment, and API key protection.
+- `@akkco/retrieval`: persistence layer using Node.js built-in `node:sqlite` (`DatabaseSync`), providing an async domain contract (`ConversationStore`, `SqliteConversationStore`) without leaking raw SQLite row types. Manages versioned SQL-file migrations (`packages/retrieval/migrations/0001_initial.sql`), single connection handle per instance with shared in-flight `initialize()` deduplication, multi-process write locking (`BEGIN IMMEDIATE` with `PRAGMA busy_timeout = 3000;` and exponential jitter backoff), strict foreign key enforcement (`PRAGMA foreign_keys = ON;`), SHA-256 checksum validation, vector BLOB serialization with Float32 overflow checks, composite provider identity isolation (`embedding_provider`, `embedding_model`, `embedding_dimensions`), safe document ID generation avoiding historical overwrites, corrupt row isolation, and cosine similarity scanning.
 - `@akkco/core`: context budgeting (`ContextBudget`), centralized token estimation (`estimateTokens`), turn-level memory document derivation, bounded model request preparation (`prepareBoundedModelRequest`, `ContextBudgetOverflowError`), dynamic memory token reclamation, memory orchestrator (`ConversationMemoryOrchestrator` with bounded timeout, signal cancellation, and drain tracking), memory retriever (`ConversationMemoryRetriever`), and async context compiler (`BoundedContextCompiler`). Does not contain raw SQL or direct HTTP calls.
 - `apps/cli`: composition root injecting configuration, default budget (`DEFAULT_CONTEXT_BUDGET`), database path (default `~/.akkco/akkco.db`, override via `AKKCO_DB_PATH`, isolated `:memory:` in test modes), and providers. Enforces fail-fast durable database initialization diagnostics and coordinated shutdown (awaiting active session turn finalization and draining pending memory indexing before closing SQLite).
 
@@ -214,6 +221,28 @@ Compiled context follows a strict deterministic order:
 - **Graceful Retrieval Fallback**: Vector retrieval is an optimization. If the embedding endpoint is offline, SQLite retrieval fails, no documents match, or the embedding model identity differs from stored vectors, the Context Compiler degrades gracefully to policy + bounded recent history + current user request. Cancellation via `AbortSignal` is always respected immediately and never swallowed.
 - **Persistence Failure Semantics**: The in-memory Session transcript is updated synchronously and remains intact even if SQLite persistence encounters an error. Write errors on completed turns are propagated to notify the caller while ensuring in-memory transcript safety.
 - **Future Repository Retrieval Seam**: Prepared with dynamic capacity sharing (`maximumRepositoryTokens`), query embedding reuse, and candidate pool integration without implementing repository indexing in Task 1.
+
+### Embedding Providers & Model Identity Isolation
+
+Akkco decouples model inference from vector embeddings, allowing local Qwen 2.5 Coder 7B inference to pair with either local (`nomic-embed-text`) or cloud-hosted (`gemini-embedding-001`) embeddings.
+
+1. **Provider Implementations**:
+    - `OpenAICompatibleEmbeddingProvider`: connects to local Ollama or OpenAI-compatible `/embeddings` endpoints.
+    - `GeminiEmbeddingProvider`: connects to Google's Gemini Embedding API with Matryoshka output dimensionality (default 768), input chunking ($\le 100$ items), bounded retries with jitter, safe input bounding, and credential redaction.
+2. **Strict Identity Isolation**:
+    - `memory_documents` stores vectors with composite identity: `embedding_provider`, `embedding_model`, and `embedding_dimensions`.
+    - SQLite queries filter strictly on all three columns (`WHERE embedding_provider = ? AND embedding_model = ? AND embedding_dimensions = ?`).
+    - Vectors generated by different models (e.g., Nomic vs. Gemini) are never compared, ranked, or silently merged, even when both use 768 dimensions.
+3. **Side-by-Side Coexistence & Safe Re-Embedding**:
+    - Document primary keys default to `${sessionId}:${startSequence}-${endSequence}:${embeddingProvider}:${embeddingModel}`.
+    - Historical Nomic vectors are never deleted, overwritten, or modified when switching to Gemini.
+    - Re-embedding historical transcripts derives documents from `transcript_items` and persists Gemini vectors alongside existing Nomic vectors.
+4. **Retrieval-Oriented Configurations**:
+    - Indexing uses task type `RETRIEVAL_DOCUMENT`.
+    - Query retrieval uses task type `RETRIEVAL_QUERY`.
+5. **Credential Safety & Data Boundaries**:
+    - `GEMINI_API_KEY` is passed exclusively via the `x-goog-api-key` header and is never written to SQLite, transcripts, or logs.
+    - Only derived memory documents and user query text are transmitted; raw tool outputs (e.g., full file reads, search dumps) are strictly omitted.
 
 ## Model Profiles & Final-Stage Context Budgeting
 
@@ -309,6 +338,16 @@ When accumulated conversational turns exceed the compaction threshold (~80% of e
     - Compaction model requests strictly enforce `tools: undefined`, ensuring compaction never triggers nested tool loops.
 - **Lossless Canonical Transcript**: Canonical transcripts in memory (`Session`) and SQLite (`transcript_items`) remain completely lossless and unaltered. Compaction is exclusively a working context projection.
 - **Operational Fault Tolerance**: Compactor errors or provider network failures degrade gracefully to standard turn eviction without corrupting history or crashing the agent session. Abort signals cleanly raise `AbortError`.
+- **Compaction Lifecycle & Progress Events**:
+    - `ContextCompactor` exposes an optional event subscription interface (`onProgress(listener: CompactionProgressListener)`) emitting typed `CompactionProgressEvent` records (`target: "history" | "tool_result"`, `phase: "start" | "success" | "fallback" | "cancel"`).
+    - Preserves domain package boundaries: `@akkco/core` defines pure TypeScript event contracts with zero dependencies on React, Ink, or UI presentation layers.
+    - Exact prefix cache hits (where an existing SQLite context summary covers the entire requested turn range without delta turns) bypass `start` event emissions, avoiding misleading flash indicators when no AI inference is performed.
+    - Terminal UI status bar hooks into these events: displaying a cyan spinner `◌ Compacting conversation history...` or `◌ Compacting <toolName> output...` during active inference, showing a brief completion or warning notice upon completion/fallback, and clearing compaction state cleanly upon idle, cancellation, or error.
+    - Status formatting is responsive: long tool or target descriptions truncate gracefully on narrow terminals without overflowing or distorting layout.
+- **Session Restoration & Context Rebinding**:
+    - Session switching (`/resume`, `/clear`) strictly validates session existence in SQLite and reconstructs the canonical in-memory transcript from persisted records ordered by sequence.
+    - The compiler factory (`createCompiler(sessionId)`) rebinds the `BoundedContextCompiler` and its underlying memory retriever and compactor session context directly to the active session ID upon switching.
+    - This ensures vector memory candidate retrieval, prefix context-summary checkpoints (`context_summaries`), and deduplication filters always target the newly active session, avoiding stale cross-session lookups without requiring reconstruction of shared database handles, embedding providers, or tool registries.
 
 ### Deterministic Prefix & Token Accounting
 

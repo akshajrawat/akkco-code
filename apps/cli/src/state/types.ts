@@ -7,6 +7,7 @@ import type {
     SessionPersistence,
 } from "@akkco/core";
 import type { ModelProfile, ModelProvider } from "@akkco/models";
+import type { ConversationStore } from "@akkco/retrieval";
 import type { CommandRegistry } from "../commands/command-registry.js";
 import type { ToolRegistry } from "@akkco/tools";
 
@@ -16,11 +17,14 @@ export interface CliControllerOptions {
     commandRegistry?: CommandRegistry;
     reliabilityOptions?: RuntimeReliabilityOptions;
     compiler?: ContextCompiler;
+    createCompiler?: (sessionId: string) => ContextCompiler;
     persistence?: SessionPersistence;
     sessionId?: string;
     profile?: ModelProfile;
     compactor?: ContextCompactor;
     budget?: ContextBudget;
+    store?: ConversationStore;
+    metadata?: CliMetadata;
 }
 
 export type NoticeKind = "info" | "error" | "warning";
@@ -37,8 +41,14 @@ export type CliMetadata = {
     cwd: string;
 };
 
+export type CompactionState = {
+    active: boolean;
+    scope: "history" | "tool";
+    toolName?: string;
+};
+
 export type ToolExecutionState = Omit<RuntimeToolExecutionEvent, "type" | "callId" | "status"> & {
-    status: RuntimeToolExecutionEvent["status"] | "running";
+    status: RuntimeToolExecutionEvent["status"] | "running" | "requested";
     showResult?: boolean;
 };
 
@@ -69,6 +79,7 @@ export type CliViewState = {
     historyVersion: number;
     assistantText: string;
     activeTool?: ToolExecutionState;
+    compaction?: CompactionState;
     status: CliStatus;
     outcome?: CliOutcome;
     queuedPrompts?: readonly string[];

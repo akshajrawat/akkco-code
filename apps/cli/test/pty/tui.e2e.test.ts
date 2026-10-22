@@ -26,8 +26,8 @@ test("Slash autocomplete: typing '/' opens palette and filtering narrows command
         let screen = await tui.screen();
         assert.ok(screen.hasText("/clear"));
         assert.ok(screen.hasText("/exit"));
-        assert.ok(screen.hasText("/tool"));
-        assert.ok(screen.hasText("/tools"));
+        assert.ok(screen.hasText("/resume"));
+        assert.ok(screen.hasText("/session"));
 
         // Type "to" -> narrows down to /tool and /tools
         await tui.write("to");
@@ -108,6 +108,28 @@ test("Command execution: submitting /clear executes and produces notice", async 
         await tui.waitForText("Conversation cleared.");
         const screen = await tui.screen();
         assert.ok(screen.hasText("Conversation cleared."));
+    } finally {
+        await tui.stop();
+    }
+});
+
+test("Command execution: /session and /sessions execute cleanly in interactive TUI", async () => {
+    const tui = await startTui();
+    try {
+        await tui.write("/session");
+        await tui.key("enter");
+
+        await tui.waitForText("Active Session:");
+        const screen = await tui.screen();
+        assert.ok(screen.hasText("Active Session:"));
+        assert.ok(screen.hasText("Transcript:"));
+
+        await tui.write("/sessions");
+        await tui.key("enter");
+
+        await tui.waitFor(
+            (s) => s.hasText("Persisted Sessions:") || s.hasText("No persisted sessions found."),
+        );
     } finally {
         await tui.stop();
     }

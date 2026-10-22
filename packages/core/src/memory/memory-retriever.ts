@@ -48,7 +48,9 @@ export class DefaultConversationMemoryRetriever implements ConversationMemoryRet
         }
 
         try {
-            const [vector] = await this.embeddingProvider.embed([text], signal);
+            const [vector] = await this.embeddingProvider.embed([text], signal, {
+                taskType: "RETRIEVAL_QUERY",
+            });
             if (!vector || vector.length === 0) {
                 return null;
             }

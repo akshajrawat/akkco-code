@@ -124,15 +124,51 @@ const main = async () => {
                 const { DeterministicFakeEmbeddingProvider } =
                     await import("@akkco/models/testing");
                 embeddingProvider = new DeterministicFakeEmbeddingProvider();
-            } else if (process.env.AKKCO_EMBEDDING_MODEL) {
+            } else if (process.env.AKKCO_EMBEDDING_PROVIDER === "gemini") {
+                const apiKey = process.env.GEMINI_API_KEY ?? process.env.AKKCO_EMBEDDING_API_KEY;
+                if (!apiKey) {
+                    throw new Error(
+                        "GEMINI_API_KEY environment variable is required when AKKCO_EMBEDDING_PROVIDER=gemini",
+                    );
+                }
+                const model = process.env.AKKCO_EMBEDDING_MODEL ?? "gemini-embedding-001";
+                let dimensions = 768;
+                if (process.env.AKKCO_EMBEDDING_DIMENSIONS) {
+                    const parsed = parseInt(process.env.AKKCO_EMBEDDING_DIMENSIONS, 10);
+                    if (isNaN(parsed) || parsed <= 0) {
+                        throw new Error(
+                            `Invalid AKKCO_EMBEDDING_DIMENSIONS: expected a positive integer, got "${process.env.AKKCO_EMBEDDING_DIMENSIONS}"`,
+                        );
+                    }
+                    dimensions = parsed;
+                }
+                const { GeminiEmbeddingProvider } = await import("@akkco/providers");
+                embeddingProvider = new GeminiEmbeddingProvider({
+                    apiKey,
+                    model,
+                    dimensions,
+                    baseUrl: process.env.AKKCO_EMBEDDING_BASE_URL,
+                });
+            } else if (
+                process.env.AKKCO_EMBEDDING_PROVIDER === "openai-compatible" ||
+                (!process.env.AKKCO_EMBEDDING_PROVIDER && process.env.AKKCO_EMBEDDING_MODEL)
+            ) {
                 const { OpenAICompatibleEmbeddingProvider } = await import("@akkco/providers");
+                let dimensions: number | undefined;
+                if (process.env.AKKCO_EMBEDDING_DIMENSIONS) {
+                    const parsed = parseInt(process.env.AKKCO_EMBEDDING_DIMENSIONS, 10);
+                    if (!isNaN(parsed) && parsed > 0) {
+                        dimensions = parsed;
+                    }
+                }
                 embeddingProvider = new OpenAICompatibleEmbeddingProvider({
                     baseUrl:
                         process.env.AKKCO_EMBEDDING_BASE_URL ??
                         process.env.AKKCO_BASE_URL ??
                         "http://localhost:11434/v1",
-                    model: process.env.AKKCO_EMBEDDING_MODEL,
+                    model: process.env.AKKCO_EMBEDDING_MODEL ?? "nomic-embed-text",
                     apiKey: process.env.AKKCO_EMBEDDING_API_KEY ?? process.env.AKKCO_API_KEY,
+                    dimensions,
                 });
             }
         } catch {
@@ -145,34 +181,6 @@ const main = async () => {
         retriever = new DefaultConversationMemoryRetriever(store, embeddingProvider);
     }
 
-    const sessionId = process.env.AKKCO_SESSION_ID ?? (await import("node:crypto")).randomUUID();
-    const contextBudget = deriveContextBudget(effectiveProfile);
-    const { createBoundedContextCompiler, createContextCompactor } = await import("@akkco/core");
-    const compactor = createContextCompactor({
-        provider,
-        profile: effectiveProfile,
-        store: store ?? undefined,
-    });
-    const compiler = createBoundedContextCompiler({
-        budget: contextBudget,
-        profile: effectiveProfile,
-        memoryRetriever: retriever,
-        compactor,
-        sessionId,
-    });
-
-    const controller = createCliController({
-        provider,
-        toolRegistry: createToolRegistry(createRepositoryTools(process.cwd())),
-        reliabilityOptions: maxToolIterations !== undefined ? { maxToolIterations } : undefined,
-        compiler,
-        persistence: orchestrator,
-        sessionId,
-        profile: effectiveProfile,
-        compactor,
-        budget: contextBudget,
-    });
-
     const manifest = JSON.parse(
         await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -184,6 +192,39 @@ const main = async () => {
         toolMode: effectiveProfile.toolMode,
         cwd: process.cwd(),
     };
+
+    const sessionId = process.env.AKKCO_SESSION_ID ?? (await import("node:crypto")).randomUUID();
+    const contextBudget = deriveContextBudget(effectiveProfile);
+    const { createBoundedContextCompiler, createContextCompactor } = await import("@akkco/core");
+    const compactor = createContextCompactor({
+        provider,
+        profile: effectiveProfile,
+        store: store ?? undefined,
+    });
+    const createCompiler = (id: string) =>
+        createBoundedContextCompiler({
+            budget: contextBudget,
+            profile: effectiveProfile,
+            memoryRetriever: retriever,
+            compactor,
+            sessionId: id,
+        });
+    const compiler = createCompiler(sessionId);
+
+    const controller = createCliController({
+        provider,
+        toolRegistry: createToolRegistry(createRepositoryTools(process.cwd())),
+        reliabilityOptions: maxToolIterations !== undefined ? { maxToolIterations } : undefined,
+        compiler,
+        createCompiler,
+        persistence: orchestrator,
+        sessionId,
+        profile: effectiveProfile,
+        compactor,
+        budget: contextBudget,
+        store,
+        metadata,
+    });
 
     const onSigint = () => {
         controller.interrupt();

@@ -6,6 +6,11 @@ export interface StoredSession {
     readonly updatedAt: string;
 }
 
+export interface StoredSessionSummary extends StoredSession {
+    readonly lastUserPrompt?: string;
+    readonly transcriptCount?: number;
+}
+
 export interface StoredTranscriptRecord {
     readonly id: string;
     readonly sessionId: string;
@@ -65,6 +70,8 @@ export interface ConversationStore {
     saveSession(session: { id: string; createdAt?: string; updatedAt?: string }): Promise<void>;
     getSession(sessionId: string): Promise<StoredSession | null>;
     hasSession(sessionId: string): Promise<boolean>;
+    listSessions(limit?: number): Promise<StoredSessionSummary[]>;
+    findSessionsByPrefix(prefix: string): Promise<StoredSession[]>;
 
     saveTranscriptItems(
         sessionId: string,

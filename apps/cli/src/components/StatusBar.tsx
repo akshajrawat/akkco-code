@@ -3,9 +3,17 @@ import type { CliMetadata, CliViewState } from "../state/types.js";
 import { palette } from "../theme/palette.js";
 import { fitLine, uiStatus } from "../ui/layout.js";
 
-const getStatusColor = (status: string, stateStatus: CliViewState["status"]) => {
+const getStatusColor = (
+    status: string,
+    stateStatus: CliViewState["status"],
+    isCompacting?: boolean,
+) => {
     if (status === "Error") {
         return palette.error;
+    }
+
+    if (isCompacting) {
+        return palette.primary;
     }
 
     if (status === "Cancelled" || stateStatus !== "idle") {
@@ -42,9 +50,11 @@ export const StatusBar = ({
     columns: number;
     offset?: number;
 }) => {
+    const isCompacting = Boolean(state.compaction?.active);
     const queued = state.queuedPrompts?.length ?? 0;
     const status = `${uiStatus(state)}${queued ? ` · ${queued} queued` : ""}`;
-    const color = getStatusColor(uiStatus(state), state.status);
+    const color = getStatusColor(uiStatus(state), state.status, isCompacting);
+    const bullet = isCompacting ? "◌" : "●";
     const context =
         state.status !== "idle" && !offset
             ? " · Enter: queue · Ctrl+C: cancel"
@@ -56,7 +66,9 @@ export const StatusBar = ({
 
     return (
         <Text wrap="truncate-end">
-            <Text color={color}>● {status}</Text>
+            <Text color={color}>
+                {bullet} {status}
+            </Text>
             <Text dimColor>
                 {fitLine(` · ${details}`, Math.max(0, columns - status.length - 2))}
             </Text>

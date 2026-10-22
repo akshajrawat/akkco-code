@@ -113,10 +113,18 @@ test("typing '/' returns all registered commands", () => {
     assert.strictEqual(prefix, "");
 
     const filtered = filterCommands(commands, prefix!);
-    assert.strictEqual(filtered.length, 4);
+    assert.strictEqual(filtered.length, 7);
 
     const names = filtered.map((c) => c.name);
-    assert.deepStrictEqual(names, ["clear", "exit", "tool", "tools"]);
+    assert.deepStrictEqual(names, [
+        "clear",
+        "exit",
+        "resume",
+        "session",
+        "sessions",
+        "tool",
+        "tools",
+    ]);
 });
 
 test("'/t' filters correctly", () => {
@@ -443,8 +451,8 @@ test("typing '/', navigating to a command expecting arguments and pressing Enter
         terminal.input.write("/");
         await waitFor(() => terminal.frame().includes("┌ Commands"));
 
-        // Navigate Down twice to reach /tool (which expects arguments)
-        // Order: clear (0), exit (1), tool (2), tools (3)
+        // Navigate Down twice to reach /resume (which expects arguments)
+        // Order: clear (0), exit (1), resume (2), session (3), sessions (4), tool (5), tools (6)
         terminal.input.write("\x1b[B");
         terminal.input.write("\x1b[B");
         await new Promise((resolve) => setTimeout(resolve, 30));
@@ -452,8 +460,8 @@ test("typing '/', navigating to a command expecting arguments and pressing Enter
         // Press Enter
         terminal.input.write("\r");
 
-        // Should complete to › /tool and close suggestions without an error notice
-        await waitFor(() => terminal.frame().includes("› /tool"));
+        // Should complete to › /resume and close suggestions without an error notice
+        await waitFor(() => terminal.frame().includes("› /resume"));
         assert.ok(!terminal.frame().includes("┌ Commands"));
         assert.ok(
             !terminal.controller

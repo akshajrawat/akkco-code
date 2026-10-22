@@ -12,6 +12,7 @@ import type {
     StoredContextSummary,
     StoredMemoryDocument,
     StoredSession,
+    StoredSessionSummary,
     StoredTranscriptRecord,
 } from "../types.js";
 import { cosineSimilarity } from "./cosine.js";
@@ -143,6 +144,82 @@ export class SqliteConversationStore implements ConversationStore {
         return Boolean(stmt.get(sessionId));
     };
 
+    listSessions = async (limit = 20): Promise<StoredSessionSummary[]> => {
+        const db = this.getDb();
+        const boundedLimit = Math.max(1, Math.min(limit, 100));
+        const stmt = db.prepare(`
+            SELECT
+                s.id,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM transcript_items WHERE session_id = s.id) AS transcript_count,
+                (SELECT payload FROM transcript_items WHERE session_id = s.id AND type = 'user' ORDER BY sequence DESC LIMIT 1) AS last_user_payload
+            FROM sessions s
+            ORDER BY s.updated_at DESC, s.created_at DESC
+            LIMIT ?
+        `);
+
+        const rows = stmt.all(boundedLimit) as Array<{
+            id: string;
+            created_at: string;
+            updated_at: string;
+            transcript_count: number;
+            last_user_payload: string | null;
+        }>;
+
+        return rows.map((row) => {
+            let lastUserPrompt: string | undefined;
+            if (row.last_user_payload) {
+                try {
+                    const parsed = JSON.parse(row.last_user_payload);
+                    if (typeof parsed?.content === "string") {
+                        lastUserPrompt = parsed.content;
+                    }
+                } catch {}
+            }
+
+            return {
+                id: row.id,
+                createdAt: row.created_at,
+                updatedAt: row.updated_at,
+                transcriptCount: Number(row.transcript_count ?? 0),
+                lastUserPrompt,
+            };
+        });
+    };
+
+    findSessionsByPrefix = async (prefix: string): Promise<StoredSession[]> => {
+        const db = this.getDb();
+        const trimmed = prefix.trim();
+        if (!trimmed) {
+            return [];
+        }
+
+        const exact = await this.getSession(trimmed);
+        if (exact) {
+            return [exact];
+        }
+
+        const stmt = db.prepare(`
+            SELECT id, created_at, updated_at
+            FROM sessions
+            WHERE id LIKE ? || '%'
+            ORDER BY updated_at DESC, created_at DESC
+        `);
+
+        const rows = stmt.all(trimmed) as Array<{
+            id: string;
+            created_at: string;
+            updated_at: string;
+        }>;
+
+        return rows.map((row) => ({
+            id: row.id,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+        }));
+    };
+
     saveTranscriptItems = async (
         sessionId: string,
         items: readonly {
@@ -263,7 +340,11 @@ export class SqliteConversationStore implements ConversationStore {
             `);
 
             for (const doc of docs) {
-                const id = doc.id ?? `${doc.sessionId}:${doc.startSequence}-${doc.endSequence}`;
+                const id =
+                    doc.id ??
+                    (doc.embeddingProvider && doc.embeddingModel
+                        ? `${doc.sessionId}:${doc.startSequence}-${doc.endSequence}:${doc.embeddingProvider}:${doc.embeddingModel}`
+                        : `${doc.sessionId}:${doc.startSequence}-${doc.endSequence}`);
                 const serialized = serializeVector(doc.embedding);
 
                 stmt.run(

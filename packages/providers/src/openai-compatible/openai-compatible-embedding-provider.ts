@@ -1,4 +1,4 @@
-import type { EmbeddingProvider } from "@akkco/models";
+import type { EmbeddingOptions, EmbeddingProvider } from "@akkco/models";
 
 export interface OpenAICompatibleEmbeddingConfig {
     baseUrl: string;
@@ -21,7 +21,11 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.dimensions = config.dimensions;
     }
 
-    embed = async (inputs: readonly string[], signal?: AbortSignal): Promise<number[][]> => {
+    embed = async (
+        inputs: readonly string[],
+        signal?: AbortSignal,
+        _options?: EmbeddingOptions,
+    ): Promise<number[][]> => {
         if (signal?.aborted) {
             throw new DOMException("The operation was aborted.", "AbortError");
         }

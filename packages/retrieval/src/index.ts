@@ -19,5 +19,6 @@ export type {
     ContextSummaryInput,
     StoredMemoryDocument,
     StoredSession,
+    StoredSessionSummary,
     StoredTranscriptRecord,
 } from "./types.js";

@@ -1,4 +1,4 @@
-import type { EmbeddingProvider } from "../contracts/embedding.js";
+import type { EmbeddingOptions, EmbeddingProvider } from "../contracts/embedding.js";
 
 export interface FakeEmbeddingProviderOptions {
     id?: string;
@@ -89,7 +89,11 @@ export class DeterministicFakeEmbeddingProvider implements EmbeddingProvider {
         }
     }
 
-    embed = async (inputs: readonly string[], signal?: AbortSignal): Promise<number[][]> => {
+    embed = async (
+        inputs: readonly string[],
+        signal?: AbortSignal,
+        _options?: EmbeddingOptions,
+    ): Promise<number[][]> => {
         if (signal?.aborted) {
             throw new DOMException("The operation was aborted.", "AbortError");
         }
