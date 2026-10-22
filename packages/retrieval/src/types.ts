@@ -70,7 +70,8 @@ export interface ConversationStore {
     saveSession(session: { id: string; createdAt?: string; updatedAt?: string }): Promise<void>;
     getSession(sessionId: string): Promise<StoredSession | null>;
     hasSession(sessionId: string): Promise<boolean>;
-    listSessions(limit?: number): Promise<StoredSessionSummary[]>;
+    listSessions(limit?: number, offset?: number): Promise<StoredSessionSummary[]>;
+    countSessions(): Promise<number>;
     findSessionsByPrefix(prefix: string): Promise<StoredSession[]>;
 
     saveTranscriptItems(

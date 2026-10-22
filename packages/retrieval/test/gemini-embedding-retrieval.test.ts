@@ -317,3 +317,214 @@ test("Gemini embedding retrieval: credentials are never written to SQLite databa
 
     await store.close();
 });
+
+test("Gemini embedding retrieval: auto-reconciles indexing timeout to >= 15000ms for Gemini provider", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    const geminiProvider = new GeminiEmbeddingProvider({
+        apiKey: "test-gemini-key",
+        timeoutMs: 12000,
+    });
+    const defaultGeminiOrchestrator = new ConversationMemoryOrchestrator(store, geminiProvider);
+    assert.equal(
+        defaultGeminiOrchestrator.indexingTimeoutMs,
+        17000,
+        "Gemini orchestrator default timeout must scale with provider timeout (12000 + 5000 = 17000ms)",
+    );
+
+    const customOptionsOrchestrator = new ConversationMemoryOrchestrator(store, geminiProvider, {
+        indexingTimeoutMs: 25000,
+    });
+    assert.equal(
+        customOptionsOrchestrator.indexingTimeoutMs,
+        25000,
+        "Explicit indexingTimeoutMs option must be respected",
+    );
+
+    const nomicProvider = new OpenAICompatibleEmbeddingProvider({
+        baseUrl: "http://localhost:11434/v1",
+        model: "nomic-embed-text",
+    });
+    const localOrchestrator = new ConversationMemoryOrchestrator(store, nomicProvider);
+    assert.equal(
+        localOrchestrator.indexingTimeoutMs,
+        5000,
+        "Local provider orchestrator must default to 5000ms",
+    );
+
+    await store.close();
+});
+
+test("Gemini embedding retrieval: opt-in diagnostics report failures without exposing API keys or document contents", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    const secretKey = "ai-secret-key-1234567890abcdef1234567890";
+    const sensitiveQuery = "confidential financial account query 998877";
+    const sensitiveContent = "TOP-SECRET internal corporate project blueprint details";
+
+    const indexingDiagnostics: Array<{
+        stage: string;
+        provider: string;
+        model: string;
+        message: string;
+    }> = [];
+    const retrievalDiagnostics: Array<{
+        stage: string;
+        provider: string;
+        model: string;
+        message: string;
+    }> = [];
+
+    const failingProvider = new GeminiEmbeddingProvider({
+        apiKey: secretKey,
+        maxRetries: 0,
+        fetch: async () => {
+            return new Response(`Quota exceeded for ${secretKey}`, { status: 429 });
+        },
+    });
+
+    const orchestrator = new ConversationMemoryOrchestrator(store, failingProvider, {
+        onDiagnostic: (d) => indexingDiagnostics.push(d),
+    });
+    const retriever = new DefaultConversationMemoryRetriever(store, failingProvider, (d) => {
+        retrievalDiagnostics.push(d);
+    });
+
+    const sessionId = "diag-sess-1";
+    await store.saveSession({ id: sessionId });
+
+    // 1. Query retrieval failure
+    const queryResult = await retriever.embedQuery(sensitiveQuery);
+    assert.equal(queryResult, null);
+    assert.equal(retrievalDiagnostics.length, 1);
+    assert.equal(retrievalDiagnostics[0].stage, "query");
+    assert.equal(retrievalDiagnostics[0].provider, "gemini");
+    assert.equal(retrievalDiagnostics[0].model, "gemini-embedding-001");
+    // Ensure no sensitive query text and no secret key
+    assert.ok(
+        !retrievalDiagnostics[0].message.includes(secretKey),
+        "Retrieval diagnostic must not leak secret API key",
+    );
+    assert.ok(
+        !retrievalDiagnostics[0].message.includes(sensitiveQuery),
+        "Retrieval diagnostic must not leak query text",
+    );
+
+    // 2. Indexing failure
+    await orchestrator.onTurnCompleted(
+        sessionId,
+        [
+            { type: "user", content: sensitiveContent },
+            { type: "assistant", content: "Acknowledged sensitive data", status: "completed" },
+        ],
+        0,
+        1,
+    );
+    await orchestrator.waitForPendingIndexing();
+
+    assert.equal(indexingDiagnostics.length, 1);
+    assert.equal(indexingDiagnostics[0].stage, "indexing");
+    assert.equal(indexingDiagnostics[0].provider, "gemini");
+    assert.equal(indexingDiagnostics[0].model, "gemini-embedding-001");
+    assert.ok(
+        !indexingDiagnostics[0].message.includes(secretKey),
+        "Indexing diagnostic must not leak secret API key",
+    );
+    assert.ok(
+        !indexingDiagnostics[0].message.includes(sensitiveContent),
+        "Indexing diagnostic must not leak document content",
+    );
+
+    await store.close();
+});
+
+test("Gemini embedding retrieval: long input handling preserves full provenance in SQLite while bounding embedding input", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    let capturedRequestBody: any = null;
+    const mockVec = create768Vector(42.0);
+
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-gemini-key",
+        dimensions: 768,
+        fetch: async (_url, init) => {
+            capturedRequestBody = JSON.parse(init?.body as string);
+            return new Response(
+                JSON.stringify({
+                    embeddings: [{ values: mockVec }],
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+        },
+    });
+
+    const orchestrator = new ConversationMemoryOrchestrator(store, provider);
+    const retriever = new DefaultConversationMemoryRetriever(store, provider);
+
+    const sessionId = "long-input-sess";
+    await store.saveSession({ id: sessionId });
+
+    // Construct a turn with > 2048 tokens
+    const headMarker = "HEADER_UNIQUE_INTENT_TOKEN_12345";
+    const middleFiller =
+        "Repeated long text block simulating large code files with many tokens. ".repeat(400);
+    const tailMarker = "TAIL_UNIQUE_RESOLUTION_TOKEN_67890";
+    const largeTurnContent = `${headMarker}\n${middleFiller}\n${tailMarker}`;
+
+    await orchestrator.onTurnCompleted(
+        sessionId,
+        [
+            { type: "user", content: "Please analyze this large file" },
+            { type: "assistant", content: largeTurnContent, status: "completed" },
+        ],
+        0,
+        1,
+    );
+    await orchestrator.waitForPendingIndexing();
+
+    // Verify what was sent over the wire to Gemini API
+    assert.ok(capturedRequestBody, "Gemini API request must have been made");
+    const embeddedText: string = capturedRequestBody.requests[0].content.parts[0].text;
+    assert.ok(
+        embeddedText.includes(
+            "[... content truncated for embedding: exceeds 2048 token limit ...]",
+        ),
+        "Embedded text sent to Gemini API must contain explicit truncation notice",
+    );
+    assert.ok(
+        embeddedText.includes(headMarker),
+        "Embedded text sent to Gemini API must preserve head marker",
+    );
+    assert.ok(
+        embeddedText.includes(tailMarker),
+        "Embedded text sent to Gemini API must preserve tail marker",
+    );
+
+    // Verify SQLite document storage: MUST contain full, untruncated content for provenance
+    const storedDocs = await store.getMemoryDocuments(sessionId);
+    assert.equal(storedDocs.length, 1);
+    assert.ok(
+        storedDocs[0].content.includes(middleFiller),
+        "SQLite memory_documents must retain the FULL untruncated content for provenance",
+    );
+    assert.ok(
+        storedDocs[0].content.includes(headMarker) && storedDocs[0].content.includes(tailMarker),
+        "SQLite memory_documents must retain complete head and tail",
+    );
+
+    // Verify retriever retrieves full document
+    const results = await retriever.retrieve({
+        queryText: "analyze large file",
+        sessionId,
+    });
+    assert.equal(results.length, 1);
+    assert.ok(
+        results[0].document.content.includes(middleFiller),
+        "Retrieved document must deliver the untruncated content from SQLite",
+    );
+
+    await store.close();
+});

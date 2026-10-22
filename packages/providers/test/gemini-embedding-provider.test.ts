@@ -92,6 +92,7 @@ test("GeminiEmbeddingProvider: embeds single input with 768 dimensions and x-goo
             {
                 model: "models/gemini-embedding-001",
                 content: { parts: [{ text: "test input" }] },
+                autoTruncate: true,
                 outputDimensionality: 768,
             },
         ],
@@ -165,13 +166,13 @@ test("GeminiEmbeddingProvider: handles batches exceeding 100 items with ordering
     }
 });
 
-test("GeminiEmbeddingProvider: safely truncates inputs exceeding maxInputCharacters", async () => {
+test("GeminiEmbeddingProvider: input within maxInputTokens (2048) is sent untruncated", async () => {
     let capturedBody: any;
-    const longText = "a".repeat(10000);
+    const normalText = "function add(a: number, b: number): number {\n    return a + b;\n}";
 
     const provider = new GeminiEmbeddingProvider({
         apiKey: "test-key",
-        maxInputCharacters: 8192,
+        maxInputTokens: 2048,
         fetch: async (_url, init) => {
             capturedBody = JSON.parse(init?.body as string);
             return new Response(
@@ -183,10 +184,119 @@ test("GeminiEmbeddingProvider: safely truncates inputs exceeding maxInputCharact
         },
     });
 
-    await provider.embed([longText]);
+    await provider.embed([normalText]);
 
     const sentText = capturedBody.requests[0].content.parts[0].text;
-    assert.equal(sentText.length, 8192);
+    assert.equal(sentText, normalText);
+    assert.equal(capturedBody.requests[0].autoTruncate, true);
+});
+
+test("GeminiEmbeddingProvider: large input exceeding maxInputTokens bounds text preserving head and tail with explicit delimiter", async () => {
+    let capturedBody: any;
+    // Generate large text with distinct head and tail (> 2048 tokens, ~10000 chars)
+    const headMarker = "START_OF_PROMPT_INTENT: How to optimize database queries?";
+    const tailMarker = "END_OF_ANSWER_RESOLUTION: Use compound index on (status, created_at).";
+    const middleFiller = "Repeated middle content with details.\n".repeat(300);
+    const largeText = `${headMarker}\n${middleFiller}\n${tailMarker}`;
+
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-key",
+        maxInputTokens: 2048,
+        fetch: async (_url, init) => {
+            capturedBody = JSON.parse(init?.body as string);
+            return new Response(
+                JSON.stringify({
+                    embeddings: [{ values: create768Vector(1) }],
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+        },
+    });
+
+    await provider.embed([largeText]);
+
+    const sentText = capturedBody.requests[0].content.parts[0].text;
+    assert.ok(sentText.includes("START_OF_PROMPT_INTENT"), "Must preserve head intent");
+    assert.ok(sentText.includes("END_OF_ANSWER_RESOLUTION"), "Must preserve tail resolution");
+    assert.ok(
+        sentText.includes("[... content truncated for embedding: exceeds 2048 token limit ...]"),
+        "Must include explicit truncation indicator rather than silent truncation",
+    );
+    assert.equal(capturedBody.requests[0].autoTruncate, true);
+});
+
+test("GeminiEmbeddingProvider: Unicode and multi-byte surrogate pairs are never split into lone surrogates", async () => {
+    let capturedBody: any;
+    // Generate text with 4-byte UTF-16 surrogate pairs (emojis) and CJK characters
+    const emojis = "🚀🌟🔥⚡🎉💻🔍".repeat(1500);
+    const unicodeText = `User intent with emojis: ${emojis}\nFinal answer: All tests passed! 🎯`;
+
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-key",
+        maxInputTokens: 2048,
+        fetch: async (_url, init) => {
+            capturedBody = JSON.parse(init?.body as string);
+            return new Response(
+                JSON.stringify({
+                    embeddings: [{ values: create768Vector(1) }],
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+        },
+    });
+
+    await provider.embed([unicodeText]);
+
+    const sentText = capturedBody.requests[0].content.parts[0].text as string;
+    // Lone high surrogate: \uD800-\uDBFF not followed by low surrogate \uDC00-\uDFFF
+    // Lone low surrogate: \uDC00-\uDFFF not preceded by high surrogate \uD800-\uDBFF
+    const loneSurrogateRegex =
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    assert.equal(
+        loneSurrogateRegex.test(sentText),
+        false,
+        "Bounding must never split surrogate pairs into invalid Unicode",
+    );
+    assert.ok(sentText.includes("User intent with emojis"));
+    assert.ok(sentText.includes("All tests passed! 🎯"));
+});
+
+test("GeminiEmbeddingProvider: code-heavy text with punctuation and indentation is accurately estimated and safely bounded", async () => {
+    let capturedBody: any;
+    const codeLines: string[] = [];
+    codeLines.push("// Entrypoint: database migration runner");
+    for (let i = 0; i < 300; i++) {
+        codeLines.push(`    if (row.sequence === ${i}) {`);
+        codeLines.push(
+            `        await db.execute("UPDATE items SET val = ? WHERE id = ?", [${i}, "item-${i}"]);`,
+        );
+        codeLines.push(`    }`);
+    }
+    codeLines.push("// Final line: return success status");
+    const codeText = codeLines.join("\n");
+
+    const provider = new GeminiEmbeddingProvider({
+        apiKey: "test-key",
+        maxInputTokens: 2048,
+        fetch: async (_url, init) => {
+            capturedBody = JSON.parse(init?.body as string);
+            return new Response(
+                JSON.stringify({
+                    embeddings: [{ values: create768Vector(1) }],
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+        },
+    });
+
+    await provider.embed([codeText]);
+
+    const sentText = capturedBody.requests[0].content.parts[0].text;
+    assert.ok(sentText.includes("Entrypoint: database migration runner"));
+    assert.ok(sentText.includes("Final line: return success status"));
+    assert.ok(
+        sentText.includes("[... content truncated for embedding: exceeds 2048 token limit ...]"),
+    );
 });
 
 test("GeminiEmbeddingProvider: redacts API key from error messages", async () => {

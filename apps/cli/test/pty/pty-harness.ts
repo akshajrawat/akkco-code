@@ -241,11 +241,13 @@ export const startTui = async (options: PtyHarnessOptions = {}): Promise<PtyHarn
         cwd: options.cwd ?? repoRoot,
         env: {
             ...process.env,
+            NODE_ENV: "test",
+            AKKCO_TEST_MODE: "1",
             AKKCO_TEST_PROVIDER: "1",
-            AKKCO_DB_PATH: options.env?.AKKCO_DB_PATH ?? dbPath,
             TERM: "xterm-256color",
             FORCE_COLOR: "1",
             ...options.env,
+            AKKCO_DB_PATH: options.env?.AKKCO_DB_PATH ?? dbPath,
         },
     });
 

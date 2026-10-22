@@ -53,6 +53,8 @@ export {
 export {
     ConversationMemoryOrchestrator,
     type SessionPersistence,
+    type ConversationMemoryOrchestratorOptions,
+    type MemoryIndexingDiagnostic,
 } from "./memory/memory-orchestrator.js";
 export {
     DefaultConversationMemoryRetriever,
@@ -60,6 +62,7 @@ export {
     type ConversationMemoryRetriever,
     type ConversationMemoryRetrieveOptions,
     type QueryEmbedding,
+    type MemoryRetrievalDiagnostic,
 } from "./memory/memory-retriever.js";
 export type * from "./runtime/events.js";
 export type * from "./runtime/tool-host.js";

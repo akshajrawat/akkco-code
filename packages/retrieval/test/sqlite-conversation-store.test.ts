@@ -398,3 +398,84 @@ test("SqliteConversationStore: context summary persistence, lookup, and range un
 
     await store.close();
 });
+
+test("SqliteConversationStore: findSessionsByPrefix treats SQL wildcard characters literally", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    await store.saveSession({ id: "sess-12345" });
+    await store.saveSession({ id: "sess_12345" });
+    await store.saveSession({ id: "sess%special" });
+    await store.saveSession({ id: "other-session" });
+
+    // Underscore must not act as a single-character wildcard matching "sess-12345"
+    const underscoreMatches = await store.findSessionsByPrefix("sess_");
+    assert.equal(underscoreMatches.length, 1);
+    assert.equal(underscoreMatches[0].id, "sess_12345");
+
+    // Percent must not act as multi-character wildcard matching everything
+    const percentMatches = await store.findSessionsByPrefix("sess%");
+    assert.equal(percentMatches.length, 1);
+    assert.equal(percentMatches[0].id, "sess%special");
+
+    // Dash matches only dash session
+    const dashMatches = await store.findSessionsByPrefix("sess-");
+    assert.equal(dashMatches.length, 1);
+    assert.equal(dashMatches[0].id, "sess-12345");
+
+    // Empty or whitespace prefix returns empty array
+    assert.deepEqual(await store.findSessionsByPrefix(""), []);
+    assert.deepEqual(await store.findSessionsByPrefix("   "), []);
+
+    // Exact match is returned directly
+    const exact = await store.findSessionsByPrefix("sess_12345");
+    assert.equal(exact.length, 1);
+    assert.equal(exact[0].id, "sess_12345");
+
+    await store.close();
+});
+
+test("SqliteConversationStore: listSessions pagination and countSessions", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    assert.equal(await store.countSessions(), 0);
+
+    for (let i = 1; i <= 15; i++) {
+        const id = `sess-${i.toString().padStart(2, "0")}`;
+        const ts = new Date(1700000000000 + i * 1000).toISOString();
+        await store.saveSession({ id, createdAt: ts, updatedAt: ts });
+    }
+
+    assert.equal(await store.countSessions(), 15);
+
+    // Default limit 20 returns all 15 newest first
+    const all = await store.listSessions();
+    assert.equal(all.length, 15);
+    assert.equal(all[0].id, "sess-15");
+    assert.equal(all[14].id, "sess-01");
+
+    // Pagination: page 1 (limit 5, offset 0)
+    const page1 = await store.listSessions(5, 0);
+    assert.equal(page1.length, 5);
+    assert.equal(page1[0].id, "sess-15");
+    assert.equal(page1[4].id, "sess-11");
+
+    // Pagination: page 2 (limit 5, offset 5)
+    const page2 = await store.listSessions(5, 5);
+    assert.equal(page2.length, 5);
+    assert.equal(page2[0].id, "sess-10");
+    assert.equal(page2[4].id, "sess-06");
+
+    // Pagination: page 3 (limit 5, offset 10)
+    const page3 = await store.listSessions(5, 10);
+    assert.equal(page3.length, 5);
+    assert.equal(page3[0].id, "sess-05");
+    assert.equal(page3[4].id, "sess-01");
+
+    // Out of bounds offset
+    const empty = await store.listSessions(5, 20);
+    assert.equal(empty.length, 0);
+
+    await store.close();
+});

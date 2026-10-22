@@ -13,6 +13,7 @@ export interface EmbeddingProvider {
     readonly id: string;
     readonly model: string;
     readonly dimensions?: number;
+    readonly timeoutMs?: number;
 
     embed(
         inputs: readonly string[],

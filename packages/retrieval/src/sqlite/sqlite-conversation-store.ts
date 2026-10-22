@@ -144,9 +144,10 @@ export class SqliteConversationStore implements ConversationStore {
         return Boolean(stmt.get(sessionId));
     };
 
-    listSessions = async (limit = 20): Promise<StoredSessionSummary[]> => {
+    listSessions = async (limit = 20, offset = 0): Promise<StoredSessionSummary[]> => {
         const db = this.getDb();
         const boundedLimit = Math.max(1, Math.min(limit, 100));
+        const boundedOffset = Math.max(0, offset);
         const stmt = db.prepare(`
             SELECT
                 s.id,
@@ -156,10 +157,10 @@ export class SqliteConversationStore implements ConversationStore {
                 (SELECT payload FROM transcript_items WHERE session_id = s.id AND type = 'user' ORDER BY sequence DESC LIMIT 1) AS last_user_payload
             FROM sessions s
             ORDER BY s.updated_at DESC, s.created_at DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
         `);
 
-        const rows = stmt.all(boundedLimit) as Array<{
+        const rows = stmt.all(boundedLimit, boundedOffset) as Array<{
             id: string;
             created_at: string;
             updated_at: string;
@@ -188,6 +189,13 @@ export class SqliteConversationStore implements ConversationStore {
         });
     };
 
+    countSessions = async (): Promise<number> => {
+        const db = this.getDb();
+        const row = db.prepare("SELECT COUNT(*) AS total FROM sessions").get() as
+            { total: number } | undefined;
+        return Number(row?.total ?? 0);
+    };
+
     findSessionsByPrefix = async (prefix: string): Promise<StoredSession[]> => {
         const db = this.getDb();
         const trimmed = prefix.trim();
@@ -200,14 +208,15 @@ export class SqliteConversationStore implements ConversationStore {
             return [exact];
         }
 
+        const escaped = trimmed.replace(/([%_\\])/g, "\\$1");
         const stmt = db.prepare(`
             SELECT id, created_at, updated_at
             FROM sessions
-            WHERE id LIKE ? || '%'
+            WHERE id LIKE ? || '%' ESCAPE '\\'
             ORDER BY updated_at DESC, created_at DESC
         `);
 
-        const rows = stmt.all(trimmed) as Array<{
+        const rows = stmt.all(escaped) as Array<{
             id: string;
             created_at: string;
             updated_at: string;

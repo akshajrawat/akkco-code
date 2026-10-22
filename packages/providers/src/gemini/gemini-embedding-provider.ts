@@ -8,11 +8,33 @@ export interface GeminiEmbeddingConfig {
     readonly taskType?: string;
     readonly maxRetries?: number;
     readonly timeoutMs?: number;
-    readonly maxInputCharacters?: number;
+    readonly maxInputTokens?: number;
     readonly fetch?: typeof globalThis.fetch;
 }
 
 const BATCH_SIZE = 100;
+
+/**
+ * Conservative token estimation for Gemini embedding inputs, accounting for
+ * multi-byte Unicode code points, CJK characters, and code symbols.
+ */
+export const estimateTokensForGemini = (text: string): number => {
+    if (!text) {
+        return 0;
+    }
+    let tokens = 0;
+    for (const char of text) {
+        const code = char.codePointAt(0) ?? 0;
+        if (code > 0x7f) {
+            tokens += 1.5;
+        } else if (/[ \t\n{}()[\];:,.<>+=!*&|~^/%-]/.test(char)) {
+            tokens += 0.8;
+        } else {
+            tokens += 0.3;
+        }
+    }
+    return Math.ceil(tokens);
+};
 
 /**
  * Concrete embedding provider integrating Google's Gemini Embedding API with
@@ -22,12 +44,12 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
     readonly id = "gemini";
     readonly model: string;
     readonly dimensions: number;
+    readonly timeoutMs: number;
+    readonly maxRetries: number;
+    readonly maxInputTokens: number;
     private readonly apiKey: string;
     private readonly baseUrl: string;
     private readonly taskType?: string;
-    private readonly maxRetries: number;
-    private readonly timeoutMs: number;
-    private readonly maxInputCharacters: number;
     private readonly fetch: typeof globalThis.fetch;
 
     constructor(config: GeminiEmbeddingConfig) {
@@ -66,12 +88,36 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
             typeof config.maxRetries === "number" && config.maxRetries >= 0 ? config.maxRetries : 2;
         this.timeoutMs =
             typeof config.timeoutMs === "number" && config.timeoutMs > 0 ? config.timeoutMs : 10000;
-        this.maxInputCharacters =
-            typeof config.maxInputCharacters === "number" && config.maxInputCharacters > 0
-                ? config.maxInputCharacters
-                : 8192;
+        this.maxInputTokens =
+            typeof config.maxInputTokens === "number" && config.maxInputTokens > 0
+                ? config.maxInputTokens
+                : 2048;
         this.fetch = config.fetch ?? globalThis.fetch;
     }
+
+    private boundInput = (text: string): string => {
+        const estimatedTokens = estimateTokensForGemini(text);
+        if (estimatedTokens <= this.maxInputTokens) {
+            return text;
+        }
+
+        const TRUNCATION_DELIMITER =
+            "\n\n[... content truncated for embedding: exceeds 2048 token limit ...]\n\n";
+
+        // Use Array.from to safely iterate over Unicode code points without splitting surrogate pairs
+        const codePoints = Array.from(text);
+        const targetCodePoints = Math.max(100, Math.floor(this.maxInputTokens * 2.5));
+        const headSize = Math.floor(targetCodePoints * 0.45);
+        const tailSize = Math.floor(targetCodePoints * 0.45);
+
+        if (codePoints.length <= headSize + tailSize) {
+            return text;
+        }
+
+        const head = codePoints.slice(0, headSize).join("");
+        const tail = codePoints.slice(codePoints.length - tailSize).join("");
+        return `${head}${TRUNCATION_DELIMITER}${tail}`;
+    };
 
     private sleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
         if (signal?.aborted) {
@@ -143,15 +189,13 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
             const batch = inputs.slice(batchStart, batchStart + BATCH_SIZE);
 
             const requests = batch.map((text) => {
-                const sanitizedText =
-                    text.length > this.maxInputCharacters
-                        ? text.slice(0, this.maxInputCharacters)
-                        : text;
+                const boundedText = this.boundInput(text);
                 const req: Record<string, unknown> = {
                     model: `models/${cleanModel}`,
                     content: {
-                        parts: [{ text: sanitizedText }],
+                        parts: [{ text: boundedText }],
                     },
+                    autoTruncate: true,
                 };
                 if (this.dimensions !== undefined) {
                     req.outputDimensionality = this.dimensions;

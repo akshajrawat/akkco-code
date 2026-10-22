@@ -10,6 +10,14 @@ export {
     type MigrationOptions,
     type MigrationResult,
 } from "./sqlite/migrations.js";
+export {
+    scanForTestSessions,
+    cleanupTestSessions,
+    createDatabaseBackup,
+    type IdentifiedTestSession,
+    type TestSessionScanReport,
+    type CleanupResult,
+} from "./sqlite/test-session-cleaner.js";
 export type {
     ConversationStore,
     MemoryCandidate,

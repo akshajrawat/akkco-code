@@ -23,6 +23,13 @@ export interface ConversationMemoryRetrieveOptions {
     readonly signal?: AbortSignal;
 }
 
+export interface MemoryRetrievalDiagnostic {
+    readonly stage: "query";
+    readonly provider: string;
+    readonly model: string;
+    readonly message: string;
+}
+
 export interface ConversationMemoryRetriever {
     retrieve(options: ConversationMemoryRetrieveOptions): Promise<ConversationMemoryCandidate[]>;
     embedQuery(text: string, signal?: AbortSignal): Promise<QueryEmbedding | null>;
@@ -32,6 +39,7 @@ export class DefaultConversationMemoryRetriever implements ConversationMemoryRet
     constructor(
         private readonly store: ConversationStore,
         private readonly embeddingProvider?: EmbeddingProvider,
+        private readonly onDiagnostic?: (diagnostic: MemoryRetrievalDiagnostic) => void,
     ) {}
 
     /**
@@ -69,6 +77,27 @@ export class DefaultConversationMemoryRetriever implements ConversationMemoryRet
                 throw error;
             }
             // Embedding endpoint unavailable/failed: degrade gracefully
+            const isDebug =
+                typeof process !== "undefined" &&
+                (process.env.AKKCO_EMBEDDING_DEBUG === "true" ||
+                    process.env.AKKCO_DEBUG === "true");
+
+            if (this.onDiagnostic || isDebug) {
+                const rawMsg = error instanceof Error ? error.message : String(error);
+                const sanitized = rawMsg.replace(/[a-zA-Z0-9_-]{20,}/g, "[REDACTED]");
+                const diag: MemoryRetrievalDiagnostic = {
+                    stage: "query",
+                    provider: this.embeddingProvider.id,
+                    model: this.embeddingProvider.model,
+                    message: sanitized,
+                };
+                this.onDiagnostic?.(diag);
+                if (isDebug) {
+                    process.stderr.write(
+                        `[embedding-diagnostic] Provider "${diag.provider}" (${diag.model}) query failed: ${sanitized}\n`,
+                    );
+                }
+            }
             return null;
         }
     };

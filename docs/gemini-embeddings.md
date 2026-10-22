@@ -10,13 +10,14 @@ Cloud embeddings must be **explicitly enabled**; they are never selected silentl
 
 ### Environment Variables
 
-| Variable                     | Description                                                                                            | Default                                            |
-| :--------------------------- | :----------------------------------------------------------------------------------------------------- | :------------------------------------------------- |
-| `AKKCO_EMBEDDING_PROVIDER`   | Set to `gemini` to enable Gemini embeddings. Set to `openai-compatible` for local Ollama/Nomic.        | _(none, disabled by default)_                      |
-| `AKKCO_EMBEDDING_MODEL`      | Embedding model identifier.                                                                            | `gemini-embedding-001` (when provider is `gemini`) |
-| `AKKCO_EMBEDDING_DIMENSIONS` | Output dimensionality (supported via Matryoshka Representation Learning).                              | `768`                                              |
-| `GEMINI_API_KEY`             | Google Gemini API key (or `AKKCO_EMBEDDING_API_KEY`). Required when `AKKCO_EMBEDDING_PROVIDER=gemini`. | _(none)_                                           |
-| `AKKCO_EMBEDDING_BASE_URL`   | Optional base URL override (for testing or enterprise proxies).                                        | `https://generativelanguage.googleapis.com`        |
+| Variable                     | Description                                                                                              | Default                                            |
+| :--------------------------- | :------------------------------------------------------------------------------------------------------- | :------------------------------------------------- |
+| `AKKCO_EMBEDDING_PROVIDER`   | Set to `gemini` to enable Gemini embeddings. Set to `openai-compatible` for local Ollama/Nomic.          | _(none, disabled by default)_                      |
+| `AKKCO_EMBEDDING_MODEL`      | Embedding model identifier.                                                                              | `gemini-embedding-001` (when provider is `gemini`) |
+| `AKKCO_EMBEDDING_DIMENSIONS` | Output dimensionality (supported via Matryoshka Representation Learning; strictly validated as integer). | `768`                                              |
+| `GEMINI_API_KEY`             | Google Gemini API key (or `AKKCO_EMBEDDING_API_KEY`). Required when `AKKCO_EMBEDDING_PROVIDER=gemini`.   | _(none)_                                           |
+| `AKKCO_EMBEDDING_BASE_URL`   | Optional base URL override (for testing or enterprise proxies).                                          | `https://generativelanguage.googleapis.com`        |
+| `AKKCO_EMBEDDING_DEBUG`      | Set to `true` or `1` to output sanitized diagnostic warnings to stderr on non-fatal embedding failures.  | _(disabled by default)_                            |
 
 ---
 
@@ -96,22 +97,49 @@ Akkco maintains full, lossless conversation transcripts in the `transcript_items
 
 ---
 
-## Reliability & Graceful Fallback
+## Strict Configuration & Validation
 
-- **Batching**: Inputs exceeding 100 items are automatically partitioned into standard API chunks of $\le 100$ items while preserving sequence order.
-- **Input Length Safety**: Inputs exceeding safe token limits are safely bounded without rejecting requests.
-- **Bounded Retries**: HTTP 429 (Rate Limits / Resource Exhausted) and 5xx transient server errors use bounded exponential backoff with random jitter, respecting `Retry-After` headers.
-- **Cancellation**: Full support for `AbortSignal` cancellation; active fetches and sleep delays abort immediately.
-- **Graceful Fallback**: If Gemini is offline, unreachable, or quota-exhausted:
-    - Query retrieval returns `[]` without interrupting the prompt loop.
+Akkco Code enforces fail-fast configuration validation at startup:
+
+- **Missing Credentials**: If `AKKCO_EMBEDDING_PROVIDER=gemini` is specified without a valid `GEMINI_API_KEY` (or `AKKCO_EMBEDDING_API_KEY`), the CLI raises an explicit `EmbeddingConfigurationError` immediately rather than failing silently or crashing during execution.
+- **Strict Dimensionality Parsing**: `AKKCO_EMBEDDING_DIMENSIONS` is validated via strict integer parsing (`/^\d+$/`). Non-integer inputs (such as `768abc` or floating-point numbers) or values $\le 0$ throw immediately.
+- **Provider Resolution**: The production configuration helper `resolveEmbeddingProvider({ env: process.env })` is independently testable and shared directly across the CLI and test suites.
+
+---
+
+## Timeout Reconciliation & Failure Handling
+
+- **Reconciled Indexer Budget**: The Gemini provider configures a 10-second per-request network timeout with exponential backoff retries. The memory indexer automatically scales its indexing timeout budget to $\ge 15$ seconds (`Math.max(15000, timeoutMs + 5000)`), ensuring that legitimate cloud network requests and retry sequences are not prematurely killed by local timeout budgets.
+- **Opt-in Diagnostics**: In the event of a non-fatal indexing or query embedding failure (e.g. quota limits or network outages), users can set `AKKCO_EMBEDDING_DEBUG=true` to receive sanitized diagnostic warnings on `process.stderr`. Diagnostics explicitly redact API keys and omit document/query contents to eliminate credential and data leaks.
+- **Graceful Session Continuity**: If Gemini is offline, unreachable, or quota-exhausted:
+    - Query retrieval returns `[]` without interrupting or slowing down the prompt loop.
     - Background indexing catches errors gracefully without failing live turns.
-    - Context caching and session history continue functioning normally.
+    - Session history, transcripts, and context-summary caching continue functioning normally.
+
+---
+
+## Long-Input Handling & Provenance Safety
+
+The `gemini-embedding-001` model has an authoritative input limit of 2,048 tokens:
+
+- **Token-Aware Slicing**: Inputs exceeding 2,048 tokens are bounded by preserving the head (~45%) and tail (~45%) of the text, joined by an explicit omission marker: `[... content truncated for embedding: exceeds 2048 token limit ...]`.
+- **Surrogate Pair Integrity**: Character slicing uses Unicode code point awareness (`Array.from(text)`), ensuring that multi-byte code points, surrogate pairs, emojis, and code-heavy Unicode sequences are never split or corrupted.
+- **Lossless Document Provenance**: While the embedding vector is computed over the bounded text to satisfy model constraints, the complete, untruncated content is stored in SQLite `memory_documents.content`. Document provenance and full-fidelity context are never discarded.
+
+---
+
+## Literal Session Prefix Matching
+
+When resuming sessions via `/resume <prefix>`:
+
+- The session lookup escapes all SQL `LIKE` wildcards (`%`, `_`, `\`) with `WHERE id LIKE ? || '%' ESCAPE '\\'`.
+- Prefix matching is strictly literal and unambiguous, ensuring that session IDs containing underscores (such as `session_2026_01`) cannot unintentionally match unrelated sessions.
 
 ---
 
 ## Verification
 
-To run focused embedding verification:
+To run focused embedding and reliability verification:
 
 ```bash
 # Run Gemini provider unit tests
@@ -119,6 +147,9 @@ npx tsx --test packages/providers/test/gemini-embedding-provider.test.ts
 
 # Run Gemini retrieval integration tests
 npx tsx --test packages/retrieval/test/gemini-embedding-retrieval.test.ts
+
+# Run SQLite store literal prefix tests
+npx tsx --test packages/retrieval/test/sqlite-conversation-store.test.ts
 
 # Run CLI configuration tests
 npx tsx --test apps/cli/test/gemini-embedding-cli.test.ts

@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import process, { stdin, stdout } from "node:process";
 import {
     DEFAULT_MODEL,
+    EmbeddingConfigurationError,
     parseCharsPerToken,
     parseContextWindowTokens,
     parseMaxOutputTokens,
@@ -12,6 +13,7 @@ import {
     parseSafetyMarginTokens,
     parseToolMode,
     resolveCliModelProfile,
+    resolveEmbeddingProvider,
 } from "./config.js";
 import { runPlainCli } from "./plain-cli.js";
 import { createCliController } from "./state/cli-controller.js";
@@ -83,21 +85,26 @@ const main = async () => {
             ? createTextToolCompatibilityProvider(boundedNativeProvider)
             : boundedNativeProvider;
 
+    const defaultProdDbPath = (await import("node:path")).join(
+        (await import("node:os")).homedir(),
+        ".akkco",
+        "akkco.db",
+    );
+
     const isTestMode = Boolean(
         process.env.AKKCO_TEST_PROVIDER ||
+        process.env.AKKCO_TEST_MODE === "1" ||
         process.env.NODE_ENV === "test" ||
         process.env.NODE_TEST_CONTEXT,
     );
 
-    const dbPath =
-        process.env.AKKCO_DB_PATH ??
-        (isTestMode
-            ? ":memory:"
-            : (await import("node:path")).join(
-                  (await import("node:os")).homedir(),
-                  ".akkco",
-                  "akkco.db",
-              ));
+    let dbPath = process.env.AKKCO_DB_PATH;
+    if (!dbPath) {
+        dbPath = isTestMode ? ":memory:" : defaultProdDbPath;
+    } else if (isTestMode && dbPath === defaultProdDbPath) {
+        // Prevent inherited default production database path from polluting production during test execution
+        dbPath = ":memory:";
+    }
 
     let store: import("@akkco/retrieval").SqliteConversationStore | undefined;
     let orchestrator: import("@akkco/core").ConversationMemoryOrchestrator | undefined;
@@ -120,59 +127,14 @@ const main = async () => {
     if (store) {
         let embeddingProvider: import("@akkco/models").EmbeddingProvider | undefined;
         try {
-            if (process.env.AKKCO_TEST_PROVIDER) {
-                const { DeterministicFakeEmbeddingProvider } =
-                    await import("@akkco/models/testing");
-                embeddingProvider = new DeterministicFakeEmbeddingProvider();
-            } else if (process.env.AKKCO_EMBEDDING_PROVIDER === "gemini") {
-                const apiKey = process.env.GEMINI_API_KEY ?? process.env.AKKCO_EMBEDDING_API_KEY;
-                if (!apiKey) {
-                    throw new Error(
-                        "GEMINI_API_KEY environment variable is required when AKKCO_EMBEDDING_PROVIDER=gemini",
-                    );
-                }
-                const model = process.env.AKKCO_EMBEDDING_MODEL ?? "gemini-embedding-001";
-                let dimensions = 768;
-                if (process.env.AKKCO_EMBEDDING_DIMENSIONS) {
-                    const parsed = parseInt(process.env.AKKCO_EMBEDDING_DIMENSIONS, 10);
-                    if (isNaN(parsed) || parsed <= 0) {
-                        throw new Error(
-                            `Invalid AKKCO_EMBEDDING_DIMENSIONS: expected a positive integer, got "${process.env.AKKCO_EMBEDDING_DIMENSIONS}"`,
-                        );
-                    }
-                    dimensions = parsed;
-                }
-                const { GeminiEmbeddingProvider } = await import("@akkco/providers");
-                embeddingProvider = new GeminiEmbeddingProvider({
-                    apiKey,
-                    model,
-                    dimensions,
-                    baseUrl: process.env.AKKCO_EMBEDDING_BASE_URL,
-                });
-            } else if (
-                process.env.AKKCO_EMBEDDING_PROVIDER === "openai-compatible" ||
-                (!process.env.AKKCO_EMBEDDING_PROVIDER && process.env.AKKCO_EMBEDDING_MODEL)
-            ) {
-                const { OpenAICompatibleEmbeddingProvider } = await import("@akkco/providers");
-                let dimensions: number | undefined;
-                if (process.env.AKKCO_EMBEDDING_DIMENSIONS) {
-                    const parsed = parseInt(process.env.AKKCO_EMBEDDING_DIMENSIONS, 10);
-                    if (!isNaN(parsed) && parsed > 0) {
-                        dimensions = parsed;
-                    }
-                }
-                embeddingProvider = new OpenAICompatibleEmbeddingProvider({
-                    baseUrl:
-                        process.env.AKKCO_EMBEDDING_BASE_URL ??
-                        process.env.AKKCO_BASE_URL ??
-                        "http://localhost:11434/v1",
-                    model: process.env.AKKCO_EMBEDDING_MODEL ?? "nomic-embed-text",
-                    apiKey: process.env.AKKCO_EMBEDDING_API_KEY ?? process.env.AKKCO_API_KEY,
-                    dimensions,
-                });
+            embeddingProvider = await resolveEmbeddingProvider({ env: process.env });
+        } catch (error) {
+            if (error instanceof EmbeddingConfigurationError) {
+                throw error;
             }
-        } catch {
-            // Graceful degradation: embedding provider setup error falls back to keyword memory
+            throw new Error(
+                `Failed to initialize embedding provider: ${error instanceof Error ? error.message : String(error)}`,
+            );
         }
 
         const { ConversationMemoryOrchestrator, DefaultConversationMemoryRetriever } =

@@ -1,94 +1,120 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { GeminiEmbeddingProvider, OpenAICompatibleEmbeddingProvider } from "@akkco/providers";
-import { SqliteConversationStore } from "@akkco/retrieval";
+import {
+    EmbeddingConfigurationError,
+    parseEmbeddingDimensions,
+    resolveEmbeddingProvider,
+} from "../src/config.js";
 
-test("CLI embedding configuration: AKKCO_EMBEDDING_PROVIDER=gemini selects GeminiEmbeddingProvider with defaults", async () => {
-    const store = new SqliteConversationStore({ dbPath: ":memory:" });
-    await store.initialize();
+test("parseEmbeddingDimensions: strictly validates positive integers", () => {
+    assert.equal(parseEmbeddingDimensions(undefined), undefined);
+    assert.equal(parseEmbeddingDimensions("768"), 768);
+    assert.equal(parseEmbeddingDimensions(" 1536 "), 1536);
 
-    const envBackup = { ...process.env };
-    try {
-        process.env.AKKCO_EMBEDDING_PROVIDER = "gemini";
-        process.env.GEMINI_API_KEY = "test-gemini-key";
-        delete process.env.AKKCO_EMBEDDING_MODEL;
-        delete process.env.AKKCO_EMBEDDING_DIMENSIONS;
-
-        let embeddingProvider: any;
-        if (process.env.AKKCO_EMBEDDING_PROVIDER === "gemini") {
-            const apiKey = process.env.GEMINI_API_KEY ?? process.env.AKKCO_EMBEDDING_API_KEY;
-            const model = process.env.AKKCO_EMBEDDING_MODEL ?? "gemini-embedding-001";
-            let dimensions = 768;
-            if (process.env.AKKCO_EMBEDDING_DIMENSIONS) {
-                dimensions = parseInt(process.env.AKKCO_EMBEDDING_DIMENSIONS, 10);
-            }
-            embeddingProvider = new GeminiEmbeddingProvider({
-                apiKey: apiKey!,
-                model,
-                dimensions,
-            });
-        }
-
-        assert.ok(embeddingProvider instanceof GeminiEmbeddingProvider);
-        assert.equal(embeddingProvider.id, "gemini");
-        assert.equal(embeddingProvider.model, "gemini-embedding-001");
-        assert.equal(embeddingProvider.dimensions, 768);
-    } finally {
-        process.env = envBackup;
-        await store.close();
-    }
-});
-
-test("CLI embedding configuration: GEMINI_API_KEY alone does NOT silently select Gemini", async () => {
-    const envBackup = { ...process.env };
-    try {
-        delete process.env.AKKCO_EMBEDDING_PROVIDER;
-        delete process.env.AKKCO_EMBEDDING_MODEL;
-        process.env.GEMINI_API_KEY = "some-key";
-
-        let selectedProvider: string | undefined;
-        if (process.env.AKKCO_EMBEDDING_PROVIDER === "gemini") {
-            selectedProvider = "gemini";
-        } else if (
-            process.env.AKKCO_EMBEDDING_PROVIDER === "openai-compatible" ||
-            (!process.env.AKKCO_EMBEDDING_PROVIDER && process.env.AKKCO_EMBEDDING_MODEL)
-        ) {
-            selectedProvider = "openai-compatible";
-        }
-
-        assert.equal(
-            selectedProvider,
-            undefined,
-            "Cloud embeddings must never be silently selected without explicit AKKCO_EMBEDDING_PROVIDER=gemini",
+    for (const invalid of ["", "   ", "768abc", "abc768", "-5", "0", "1.5", "NaN", "Infinity"]) {
+        assert.throws(
+            () => parseEmbeddingDimensions(invalid),
+            EmbeddingConfigurationError,
+            `Expected "${invalid}" to be rejected by strict integer parsing`,
         );
-    } finally {
-        process.env = envBackup;
     }
 });
 
-test("CLI embedding configuration: explicit Nomic/local configuration is preserved", async () => {
-    const envBackup = { ...process.env };
-    try {
-        delete process.env.AKKCO_EMBEDDING_PROVIDER;
-        process.env.AKKCO_EMBEDDING_MODEL = "nomic-embed-text";
+test("resolveEmbeddingProvider: AKKCO_EMBEDDING_PROVIDER=gemini selects GeminiEmbeddingProvider with defaults", async () => {
+    const provider = await resolveEmbeddingProvider({
+        env: {
+            AKKCO_EMBEDDING_PROVIDER: "gemini",
+            GEMINI_API_KEY: "test-gemini-key",
+        },
+    });
 
-        let embeddingProvider: any;
-        if (process.env.AKKCO_EMBEDDING_PROVIDER === "gemini") {
-            embeddingProvider = new GeminiEmbeddingProvider({ apiKey: "key" });
-        } else if (
-            process.env.AKKCO_EMBEDDING_PROVIDER === "openai-compatible" ||
-            (!process.env.AKKCO_EMBEDDING_PROVIDER && process.env.AKKCO_EMBEDDING_MODEL)
-        ) {
-            embeddingProvider = new OpenAICompatibleEmbeddingProvider({
-                baseUrl: "http://localhost:11434/v1",
-                model: process.env.AKKCO_EMBEDDING_MODEL ?? "nomic-embed-text",
+    assert.ok(provider instanceof GeminiEmbeddingProvider);
+    assert.equal(provider.id, "gemini");
+    assert.equal(provider.model, "gemini-embedding-001");
+    assert.equal(provider.dimensions, 768);
+});
+
+test("resolveEmbeddingProvider: throws EmbeddingConfigurationError when GEMINI_API_KEY is missing", async () => {
+    await assert.rejects(
+        async () => {
+            await resolveEmbeddingProvider({
+                env: {
+                    AKKCO_EMBEDDING_PROVIDER: "gemini",
+                },
             });
-        }
+        },
+        (err: unknown) => {
+            assert.ok(err instanceof EmbeddingConfigurationError);
+            assert.match(
+                err.message,
+                /GEMINI_API_KEY environment variable is required when AKKCO_EMBEDDING_PROVIDER=gemini/,
+            );
+            return true;
+        },
+    );
+});
 
-        assert.ok(embeddingProvider instanceof OpenAICompatibleEmbeddingProvider);
-        assert.equal(embeddingProvider.id, "openai-compatible");
-        assert.equal(embeddingProvider.model, "nomic-embed-text");
-    } finally {
-        process.env = envBackup;
+test("resolveEmbeddingProvider: throws EmbeddingConfigurationError on invalid dimensions", async () => {
+    for (const invalid of ["768abc", "-1", "0", "invalid"]) {
+        await assert.rejects(
+            async () => {
+                await resolveEmbeddingProvider({
+                    env: {
+                        AKKCO_EMBEDDING_PROVIDER: "gemini",
+                        GEMINI_API_KEY: "test-key",
+                        AKKCO_EMBEDDING_DIMENSIONS: invalid,
+                    },
+                });
+            },
+            (err: unknown) => {
+                assert.ok(err instanceof EmbeddingConfigurationError);
+                assert.match(err.message, /Invalid AKKCO_EMBEDDING_DIMENSIONS/);
+                return true;
+            },
+        );
     }
+});
+
+test("resolveEmbeddingProvider: throws EmbeddingConfigurationError on unsupported provider", async () => {
+    await assert.rejects(
+        async () => {
+            await resolveEmbeddingProvider({
+                env: {
+                    AKKCO_EMBEDDING_PROVIDER: "unsupported-provider",
+                },
+            });
+        },
+        (err: unknown) => {
+            assert.ok(err instanceof EmbeddingConfigurationError);
+            assert.match(err.message, /Invalid AKKCO_EMBEDDING_PROVIDER: "unsupported-provider"/);
+            return true;
+        },
+    );
+});
+
+test("resolveEmbeddingProvider: GEMINI_API_KEY alone does NOT silently select Gemini", async () => {
+    const provider = await resolveEmbeddingProvider({
+        env: {
+            GEMINI_API_KEY: "some-key",
+        },
+    });
+
+    assert.equal(
+        provider,
+        undefined,
+        "Cloud embeddings must never be silently selected without explicit AKKCO_EMBEDDING_PROVIDER=gemini",
+    );
+});
+
+test("resolveEmbeddingProvider: explicit Nomic/local configuration is preserved", async () => {
+    const provider = await resolveEmbeddingProvider({
+        env: {
+            AKKCO_EMBEDDING_MODEL: "nomic-embed-text",
+        },
+    });
+
+    assert.ok(provider instanceof OpenAICompatibleEmbeddingProvider);
+    assert.equal(provider.id, "openai-compatible");
+    assert.equal(provider.model, "nomic-embed-text");
 });

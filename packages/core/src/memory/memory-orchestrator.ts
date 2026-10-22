@@ -3,6 +3,18 @@ import type { ConversationStore } from "@akkco/retrieval";
 import type { TranscriptItem } from "../transcript/types.js";
 import { createMemoryDocumentFromTurn } from "./memory-document.js";
 
+export interface MemoryIndexingDiagnostic {
+    readonly stage: "indexing";
+    readonly provider: string;
+    readonly model: string;
+    readonly message: string;
+}
+
+export interface ConversationMemoryOrchestratorOptions {
+    readonly indexingTimeoutMs?: number;
+    readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
+}
+
 export interface SessionPersistence {
     saveTranscriptItems(
         sessionId: string,
@@ -25,12 +37,27 @@ export interface SessionPersistence {
  */
 export class ConversationMemoryOrchestrator implements SessionPersistence {
     private readonly inFlightIndexing = new Set<Promise<void>>();
+    readonly indexingTimeoutMs: number;
+    private readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
 
     constructor(
         private readonly store: ConversationStore,
         private readonly embeddingProvider?: EmbeddingProvider,
-        private readonly indexingTimeoutMs: number = 5000,
-    ) {}
+        indexingTimeoutOrOptions?: number | ConversationMemoryOrchestratorOptions,
+    ) {
+        const defaultTimeout =
+            embeddingProvider?.id === "gemini"
+                ? Math.max(15000, (embeddingProvider.timeoutMs ?? 10000) + 5000)
+                : 5000;
+        if (typeof indexingTimeoutOrOptions === "number") {
+            this.indexingTimeoutMs = indexingTimeoutOrOptions;
+        } else if (indexingTimeoutOrOptions && typeof indexingTimeoutOrOptions === "object") {
+            this.indexingTimeoutMs = indexingTimeoutOrOptions.indexingTimeoutMs ?? defaultTimeout;
+            this.onDiagnostic = indexingTimeoutOrOptions.onDiagnostic;
+        } else {
+            this.indexingTimeoutMs = defaultTimeout;
+        }
+    }
 
     saveTranscriptItems = async (
         sessionId: string,
@@ -106,8 +133,29 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                     embeddingProvider: embeddingProvider.id,
                     embeddingModel: embeddingProvider.model,
                 });
-            } catch {
+            } catch (error) {
                 // Graceful degradation: embedding indexing failure or timeout does not compromise conversation continuity
+                const isDebug =
+                    typeof process !== "undefined" &&
+                    (process.env.AKKCO_EMBEDDING_DEBUG === "true" ||
+                        process.env.AKKCO_DEBUG === "true");
+
+                if (this.onDiagnostic || isDebug) {
+                    const rawMsg = error instanceof Error ? error.message : String(error);
+                    const sanitized = rawMsg.replace(/[a-zA-Z0-9_-]{20,}/g, "[REDACTED]");
+                    const diag: MemoryIndexingDiagnostic = {
+                        stage: "indexing",
+                        provider: embeddingProvider.id,
+                        model: embeddingProvider.model,
+                        message: sanitized,
+                    };
+                    this.onDiagnostic?.(diag);
+                    if (isDebug) {
+                        process.stderr.write(
+                            `[embedding-diagnostic] Provider "${diag.provider}" (${diag.model}) indexing failed: ${sanitized}\n`,
+                        );
+                    }
+                }
             } finally {
                 clearTimeout(timeoutId);
                 if (options?.signal) {

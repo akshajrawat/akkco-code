@@ -15,7 +15,37 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliEntry = path.resolve(__dirname, "../src/index.ts");
 const tsxBin = path.resolve(__dirname, "../../../node_modules/.bin/tsx");
 
-process.env.AKKCO_DB_PATH = process.env.AKKCO_DB_PATH ?? ":memory:";
+const spawnTestCli = (
+    options: {
+        args?: string[];
+        env?: Record<string, string | undefined>;
+        cwd?: string;
+        stdio?: ["pipe", "pipe", "pipe"];
+    } = {},
+) => {
+    const finalEnv: Record<string, string> = {
+        ...process.env,
+        NODE_ENV: "test",
+        AKKCO_TEST_MODE: "1",
+        AKKCO_DB_PATH: ":memory:",
+    };
+
+    if (options.env) {
+        for (const [key, value] of Object.entries(options.env)) {
+            if (value === undefined) {
+                delete finalEnv[key];
+            } else {
+                finalEnv[key] = value;
+            }
+        }
+    }
+
+    return spawn(tsxBin, [cliEntry, ...(options.args ?? [])], {
+        cwd: options.cwd,
+        env: finalEnv,
+        stdio: options.stdio ?? ["pipe", "pipe", "pipe"],
+    });
+};
 
 const waitForOutput = async (predicate: () => boolean, timeoutMs = 5000) => {
     const start = Date.now();
@@ -57,9 +87,8 @@ test("Ctrl+C (SIGINT) cancels active generation without killing the CLI, allowin
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as any).port;
 
-    const cp = spawn(tsxBin, [cliEntry], {
-        env: { ...process.env, AKKCO_BASE_URL: `http://127.0.0.1:${port}/v1` },
-        stdio: ["pipe", "pipe", "pipe"],
+    const cp = spawnTestCli({
+        env: { AKKCO_BASE_URL: `http://127.0.0.1:${port}/v1` },
     });
 
     let output = "";
@@ -98,9 +127,8 @@ test("Ctrl+C (SIGINT) cancels active generation without killing the CLI, allowin
 });
 
 test("Ctrl+C (SIGINT) while idle at the prompt cleanly exits the CLI", async () => {
-    const cp = spawn(tsxBin, [cliEntry], {
-        env: { ...process.env, AKKCO_BASE_URL: "http://127.0.0.1:1/v1" },
-        stdio: ["pipe", "pipe", "pipe"],
+    const cp = spawnTestCli({
+        env: { AKKCO_BASE_URL: "http://127.0.0.1:1/v1" },
     });
 
     let output = "";
@@ -117,10 +145,9 @@ test("Ctrl+C (SIGINT) while idle at the prompt cleanly exits the CLI", async () 
 });
 
 test("CLI /tools and /tool commands execute tools and handle errors gracefully", async () => {
-    const cp = spawn(tsxBin, [cliEntry], {
+    const cp = spawnTestCli({
         cwd: path.resolve(__dirname, "../../.."),
-        env: { ...process.env, AKKCO_BASE_URL: "http://127.0.0.1:1/v1" },
-        stdio: ["pipe", "pipe", "pipe"],
+        env: { AKKCO_BASE_URL: "http://127.0.0.1:1/v1" },
     });
 
     let output = "";
@@ -171,9 +198,8 @@ test("CLI /tools and /tool commands execute tools and handle errors gracefully",
 });
 
 test("CLI rejects invalid AKKCO_TOOL_MODE with error code 1", async () => {
-    const cp = spawn(tsxBin, [cliEntry], {
-        env: { ...process.env, AKKCO_TOOL_MODE: "unsupported_mode" },
-        stdio: ["pipe", "pipe", "pipe"],
+    const cp = spawnTestCli({
+        env: { AKKCO_TOOL_MODE: "unsupported_mode" },
     });
 
     let stderr = "";
@@ -185,13 +211,11 @@ test("CLI rejects invalid AKKCO_TOOL_MODE with error code 1", async () => {
 });
 
 test("CLI accepts AKKCO_TOOL_MODE=compatibility cleanly", async () => {
-    const cp = spawn(tsxBin, [cliEntry], {
+    const cp = spawnTestCli({
         env: {
-            ...process.env,
             AKKCO_TOOL_MODE: "compatibility",
             AKKCO_BASE_URL: "http://127.0.0.1:1/v1",
         },
-        stdio: ["pipe", "pipe", "pipe"],
     });
 
     let output = "";
@@ -253,16 +277,14 @@ for (const mode of ["native", "compatibility"]) {
             const address = server.address();
             assert.ok(address && typeof address !== "string");
 
-            const cp = spawn(tsxBin, [cliEntry], {
+            const cp = spawnTestCli({
                 cwd: path.resolve(__dirname, "../../.."),
                 env: {
-                    ...process.env,
                     AKKCO_TOOL_MODE: mode,
                     AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
                     FORCE_COLOR: "3",
                     NO_COLOR: undefined,
                 },
-                stdio: ["pipe", "pipe", "pipe"],
             });
 
             let output = "";
@@ -335,13 +357,11 @@ test(
         const address = server.address();
         assert.ok(address && typeof address !== "string");
 
-        const cp = spawn(tsxBin, [cliEntry], {
+        const cp = spawnTestCli({
             env: {
-                ...process.env,
                 AKKCO_TOOL_MODE: "native",
                 AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
             },
-            stdio: ["pipe", "pipe", "pipe"],
         });
 
         let output = "";
@@ -377,7 +397,7 @@ test(
     { timeout: 10000 },
     async () => {
         for (const input of ["", "/tools\n/exit\n/tool unknown_tool {}\n"]) {
-            const cp = spawn(tsxBin, [cliEntry], { stdio: ["pipe", "pipe", "pipe"] });
+            const cp = spawnTestCli();
 
             let output = "";
 
@@ -459,16 +479,12 @@ test(
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as any;
 
-        const env: NodeJS.ProcessEnv = {
-            ...process.env,
-            AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
-        };
-        delete env.AKKCO_TOOL_MODE;
-
-        const cp = spawn(tsxBin, [cliEntry], {
+        const cp = spawnTestCli({
             cwd: path.resolve(__dirname, "../../.."),
-            env,
-            stdio: ["pipe", "pipe", "pipe"],
+            env: {
+                AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+                AKKCO_TOOL_MODE: undefined,
+            },
         });
 
         let output = "";
@@ -530,14 +546,12 @@ test("CLI respects explicit AKKCO_TOOL_MODE=native", { timeout: 10000 }, async (
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address() as any;
 
-    const cp = spawn(tsxBin, [cliEntry], {
+    const cp = spawnTestCli({
         cwd: path.resolve(__dirname, "../../.."),
         env: {
-            ...process.env,
             AKKCO_TOOL_MODE: "native",
             AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
         },
-        stdio: ["pipe", "pipe", "pipe"],
     });
 
     let output = "";
@@ -562,9 +576,8 @@ test(
     { timeout: 10000 },
     async () => {
         for (const invalidVal of ["invalid", "-5", "0", "1.5", "Infinity"]) {
-            const cp = spawn(tsxBin, [cliEntry], {
-                env: { ...process.env, AKKCO_MAX_TOOL_ITERATIONS: invalidVal },
-                stdio: ["pipe", "pipe", "pipe"],
+            const cp = spawnTestCli({
+                env: { AKKCO_MAX_TOOL_ITERATIONS: invalidVal },
             });
 
             let output = "";
@@ -606,15 +619,13 @@ test(
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as any;
 
-        const cp = spawn(tsxBin, [cliEntry], {
+        const cp = spawnTestCli({
             cwd: path.resolve(__dirname, "../../.."),
             env: {
-                ...process.env,
                 AKKCO_TOOL_MODE: "compatibility",
                 AKKCO_MAX_TOOL_ITERATIONS: "1",
                 AKKCO_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
             },
-            stdio: ["pipe", "pipe", "pipe"],
         });
 
         let output = "";
@@ -774,14 +785,12 @@ test("F-019: CLI in test mode uses in-memory database and never creates ~/.akkco
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "akkco-test-home-"));
 
     try {
-        const cp = spawn(tsxBin, [cliEntry], {
+        const cp = spawnTestCli({
             env: {
-                ...process.env,
                 HOME: tempHome,
                 AKKCO_TEST_PROVIDER: "1",
                 AKKCO_DB_PATH: undefined, // Explicitly unset
             },
-            stdio: ["pipe", "pipe", "pipe"],
         });
 
         let output = "";
@@ -820,13 +829,11 @@ test("F-007: CLI startup fails fast with clear diagnostic when durable SQLite ca
     const impossibleDbPath = path.join(blockerFile, "nested", "akkco.db");
 
     try {
-        const cp = spawn(tsxBin, [cliEntry], {
+        const cp = spawnTestCli({
             env: {
-                ...process.env,
                 AKKCO_TEST_PROVIDER: "1",
                 AKKCO_DB_PATH: impossibleDbPath,
             },
-            stdio: ["pipe", "pipe", "pipe"],
         });
 
         let output = "";
@@ -840,6 +847,68 @@ test("F-007: CLI startup fails fast with clear diagnostic when durable SQLite ca
             "CLI should exit with non-zero status on durable DB failure",
         );
         assert.match(output, /Failed to initialize SQLite database/i);
+    } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+    }
+});
+
+test("CLI test isolation: automated test execution never modifies or pollutes persistent production database", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const { SqliteConversationStore } = await import("@akkco/retrieval");
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "akkco-isolation-db-"));
+    const fakeProdDbPath = path.join(tempDir, "fake-prod.db");
+
+    // 1. Seed a fake production database with a real user session
+    const store = new SqliteConversationStore({ dbPath: fakeProdDbPath });
+    await store.initialize();
+    await store.saveSession({ id: "real-prod-user-session-999" });
+    await store.saveTranscriptItems("real-prod-user-session-999", [
+        {
+            sequence: 0,
+            type: "user",
+            payload: JSON.stringify({ type: "user", content: "real user production message" }),
+        },
+    ]);
+    await store.close();
+
+    try {
+        // 2. Spawn CLI using spawnTestCli which guarantees isolated :memory: database
+        const cp = spawnTestCli({
+            env: {
+                AKKCO_TEST_PROVIDER: "1",
+            },
+        });
+
+        let output = "";
+        cp.stdout.on("data", (d) => (output += d.toString()));
+        cp.stderr.on("data", (d) => (output += d.toString()));
+
+        await waitForOutput(() => output.includes("> "));
+
+        // Send a test message and then /exit
+        cp.stdin.write("test message from automated runner\n");
+        await waitForOutput(() => output.includes("Hello from Akkco deterministic provider"));
+        cp.stdin.write("/exit\n");
+
+        const exitCode = await waitForExit(cp);
+        assert.strictEqual(exitCode, 0);
+
+        // 3. Inspect the fake production database: it must remain 100% untouched
+        const verifyStore = new SqliteConversationStore({ dbPath: fakeProdDbPath });
+        await verifyStore.initialize();
+        const sessions = await verifyStore.listSessions();
+        assert.strictEqual(
+            sessions.length,
+            1,
+            "Production database must contain only the original session",
+        );
+        assert.strictEqual(sessions[0].id, "real-prod-user-session-999");
+        assert.strictEqual(sessions[0].lastUserPrompt, "real user production message");
+
+        const items = await verifyStore.getTranscriptItems("real-prod-user-session-999");
+        assert.strictEqual(items.length, 1);
+        await verifyStore.close();
     } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
     }
