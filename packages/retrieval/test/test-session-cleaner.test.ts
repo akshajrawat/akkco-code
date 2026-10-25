@@ -292,7 +292,7 @@ test("testSessionCleaner safety: generic prompts and mentions of __TEST_WAIT__ a
     }
 });
 
-test("testSessionCleaner: revalidation immediately before deletion prevents stale scan deletion", async () => {
+test("testSessionCleaner: revalidation immediately before deletion prevents stale scan deletion of mixed sessions", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cleaner-stale-test-"));
     const dbPath = path.join(tempDir, "stale.db");
 
@@ -309,10 +309,11 @@ test("testSessionCleaner: revalidation immediately before deletion prevents stal
         },
     ]);
 
-    // Initial scan identifies it
-    const report = await scanForTestSessions(dbPath);
-    assert.equal(report.testSessions.length, 1);
-    assert.equal(report.testSessions[0].id, sessId);
+    // Initial scan identifies it when it only has the automated test directive
+    const initialReport = await scanForTestSessions(dbPath);
+    assert.equal(initialReport.testSessions.length, 1);
+    assert.equal(initialReport.testSessions[0].id, sessId);
+    assert.equal(initialReport.testSessions[0].deletionAuthorized, true);
 
     // Stale modification: Before cleanup is run, the user resumes the session and adds legitimate project turns
     await store.saveTranscriptItems(sessId, [
@@ -337,12 +338,50 @@ test("testSessionCleaner: revalidation immediately before deletion prevents stal
     await store.close();
 
     try {
-        // Cleanup with the stale scan ID
+        // Fresh scan must fail-closed on mixed-content sessions
+        const freshReport = await scanForTestSessions(dbPath);
+        assert.equal(
+            freshReport.testSessions.length,
+            0,
+            "Resumed mixed-content session must not be classified as a test session",
+        );
+        assert.equal(
+            freshReport.userSessionsCount,
+            1,
+            "Mixed-content session must be counted as a preserved user session",
+        );
+
+        // Attempt destructive cleanup using the stale scan result ID
         const result = await cleanupTestSessions(dbPath, [sessId], { backup: false });
 
-        // Revalidation must identify that it now has legitimate non-test content or evaluate correctly
-        // Since sequence 0 is __TEST_WAIT__, let's check revalidation:
-        // Notice: evaluateTestEvidence checks all records. If a session is mixed, we can verify behavior.
+        // Assert fail-closed behavior: session was skipped and 0 records were deleted
+        assert.equal(result.deletedSessions, 0, "Must not delete mixed-content session");
+        assert.equal(
+            result.deletedTranscripts,
+            0,
+            "Must not delete transcripts of mixed-content session",
+        );
+        assert.deepEqual(
+            result.skippedSessions,
+            [sessId],
+            "Stale session ID must be reported in skippedSessions",
+        );
+
+        // Re-open store and verify the resumed session and all its records are 100% intact
+        const verifyStore = new SqliteConversationStore({ dbPath });
+        await verifyStore.initialize();
+        const remaining = await verifyStore.listSessions();
+        assert.equal(remaining.length, 1);
+        assert.equal(remaining[0].id, sessId);
+
+        const items = await verifyStore.getTranscriptItems(sessId);
+        assert.equal(items.length, 3, "All 3 transcript items must remain intact");
+        const parsed1 = JSON.parse(items[1].payload);
+        assert.equal(parsed1.content, "Actually, please help me write production code.");
+        const parsed2 = JSON.parse(items[2].payload);
+        assert.equal(parsed2.content, "Certainly! Let's proceed with production code.");
+
+        await verifyStore.close();
     } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
     }

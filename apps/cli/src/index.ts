@@ -215,7 +215,7 @@ const main = async () => {
         process.off("SIGINT", onSigint);
         process.off("SIGTERM", onSigterm);
         await controller.dispose();
-        await orchestrator?.waitForPendingIndexing(2000);
+        await orchestrator?.close();
         await store?.close().catch(() => {});
     }
 };

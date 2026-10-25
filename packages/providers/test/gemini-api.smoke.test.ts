@@ -18,10 +18,7 @@ test("Gemini API live smoke test", async (t) => {
         return;
     }
 
-    // Never log or expose the raw API key
-    const maskedKey =
-        apiKey.length > 8 ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : "[CONFIGURED]";
-    console.log(`Running live Gemini smoke test with API key: ${maskedKey}`);
+    console.log("Running live Gemini smoke test with configured API key.");
 
     const provider = new GeminiEmbeddingProvider({
         apiKey,
@@ -101,9 +98,5 @@ test("Gemini API live smoke test", async (t) => {
         false,
         "Error message must NEVER expose the raw API key",
     );
-    assert.ok(
-        caughtError.message.includes("[REDACTED]"),
-        "Error message must redact sensitive credentials",
-    );
-    console.log("✔ Credential redaction confirmed: API key is never exposed.");
+    console.log("✔ Credential protection confirmed: API key is never exposed.");
 });

@@ -49,40 +49,100 @@ const TEST_RESPONSE_PATTERNS = [
     "Deterministic response",
 ];
 
+const isTestDirective = (content: string): string | null => {
+    const trimmed = content.trim();
+    for (const marker of TEST_DIRECTIVE_PATTERNS) {
+        if (
+            trimmed === marker ||
+            trimmed.startsWith(`${marker} `) ||
+            trimmed.startsWith(`${marker}\n`)
+        ) {
+            return marker;
+        }
+    }
+    return null;
+};
+
+const isKnownTestUserInput = (
+    content: string,
+    allRecords: readonly { type: string; payload: string }[],
+): boolean => {
+    if (isTestDirective(content)) {
+        return true;
+    }
+    if (content === "first line\nsecond line\nthird line") {
+        return true;
+    }
+    if (
+        (content === "first turn" || content === "second turn") &&
+        allRecords.some((r) => r.payload.includes("slow response"))
+    ) {
+        return true;
+    }
+    if (
+        (content === "first" || content === "second" || content === "third") &&
+        allRecords.some(
+            (r) =>
+                r.payload.includes("response 1") ||
+                r.payload.includes("response 2") ||
+                r.payload.includes("response 3"),
+        )
+    ) {
+        return true;
+    }
+    if (
+        content === "Hello" &&
+        allRecords.some((r) => r.payload.includes("Hello from Akkco deterministic provider."))
+    ) {
+        return true;
+    }
+    return false;
+};
+
 /**
  * Checks whether the transcript records of a session match verifiable automated test signatures.
  * Separates probable test detection from deletion authorization:
  * - Generic prompts such as "inspect CLI" or mentions of "__TEST_WAIT__" are explicitly rejected
  *   as sufficient evidence to authorize deletion.
  * - Deletion authorization requires verifiable test provider output, mock call IDs, or strict test directives.
+ * - Mixed-content sessions (sessions containing legitimate user conversation alongside test records)
+ *   strictly fail closed to prevent data loss.
  */
 export const evaluateTestEvidence = (
     records: readonly { type: string; payload: string }[],
 ): TestEvidenceEvaluation => {
     let samplePrompt: string | undefined;
+    let testEvidenceReason: string | undefined;
+    let hasLegitimateUserContent = false;
 
-    // First pass: extract user prompts and check for legitimate conversational turns
     for (const record of records) {
         let content = "";
+        let recordType = record.type;
         try {
             const parsed = JSON.parse(record.payload);
             content = typeof parsed?.content === "string" ? parsed.content : "";
-            if (record.type === "user" && content && !samplePrompt) {
+            if (typeof parsed?.type === "string") {
+                recordType = parsed.type;
+            }
+            if (recordType === "user" && content && !samplePrompt) {
                 samplePrompt = content;
             }
         } catch {
             content = record.payload;
         }
 
+        // Check if this user turn is a legitimate non-test conversation
+        if (recordType === "user" && content.trim()) {
+            if (!isKnownTestUserInput(content, records)) {
+                hasLegitimateUserContent = true;
+            }
+        }
+
         // 1. Verifiable DeterministicTestProvider canned responses (authoritative test evidence)
         for (const pattern of TEST_RESPONSE_PATTERNS) {
             if (content.includes(pattern)) {
-                return {
-                    isProbableTest: true,
-                    isAuthorizedForDeletion: true,
-                    reason: `Contains DeterministicTestProvider canned response: "${pattern}"`,
-                    samplePrompt,
-                };
+                testEvidenceReason = `Contains DeterministicTestProvider canned response: "${pattern}"`;
+                break;
             }
         }
 
@@ -91,12 +151,7 @@ export const evaluateTestEvidence = (
             record.payload.includes('"callId":"call_test_list"') ||
             record.payload.includes('"callId":"read-call"')
         ) {
-            return {
-                isProbableTest: true,
-                isAuthorizedForDeletion: true,
-                reason: "Matches automated CLI mock tool call signature",
-                samplePrompt,
-            };
+            testEvidenceReason = "Matches automated CLI mock tool call signature";
         }
 
         // 3. Automated CLI multi-turn test sequences
@@ -104,24 +159,14 @@ export const evaluateTestEvidence = (
             (content === "first turn" || content === "second turn") &&
             records.some((r) => r.payload.includes("slow response"))
         ) {
-            return {
-                isProbableTest: true,
-                isAuthorizedForDeletion: true,
-                reason: "Matches CLI SIGINT cancellation test turn sequence",
-                samplePrompt,
-            };
+            testEvidenceReason = "Matches CLI SIGINT cancellation test turn sequence";
         }
 
         if (
             content === "first line\nsecond line\nthird line" &&
             records.some((r) => r.type === "assistant")
         ) {
-            return {
-                isProbableTest: true,
-                isAuthorizedForDeletion: true,
-                reason: "Matches CLI bracketed multiline paste test input",
-                samplePrompt,
-            };
+            testEvidenceReason = "Matches CLI bracketed multiline paste test input";
         }
 
         if (
@@ -133,37 +178,46 @@ export const evaluateTestEvidence = (
                     r.payload.includes("response 3"),
             )
         ) {
-            return {
-                isProbableTest: true,
-                isAuthorizedForDeletion: true,
-                reason: "Matches CLI piped turn queue test sequence",
-                samplePrompt,
-            };
+            testEvidenceReason = "Matches CLI piped turn queue test sequence";
         }
 
         // 4. Test directive commands: Must strictly start with or equal the directive.
-        // Merely mentioning "__TEST_WAIT__" in conversational text (e.g., "How does __TEST_WAIT__ work?")
-        // is NOT sufficient evidence to authorize deletion.
-        for (const marker of TEST_DIRECTIVE_PATTERNS) {
-            const trimmed = content.trim();
-            const isDirectiveCommand =
-                trimmed === marker ||
-                trimmed.startsWith(`${marker} `) ||
-                trimmed.startsWith(`${marker}\n`);
-
-            if (isDirectiveCommand) {
-                return {
-                    isProbableTest: true,
-                    isAuthorizedForDeletion: true,
-                    reason: `Matches automated test harness directive: "${marker}"`,
-                    samplePrompt,
-                };
-            }
+        const matchedDirective = isTestDirective(content);
+        if (matchedDirective) {
+            testEvidenceReason ??= `Matches automated test harness directive: "${matchedDirective}"`;
         }
     }
 
-    // Generic prompts like "inspect CLI", "inspect the CLI", or mentions of test flags
-    // without test provider signatures are classified as normal user sessions.
+    // Fail-closed rule for mixed-content sessions:
+    // If a session has legitimate user conversation, it must NEVER be deleted,
+    // even if older records in the session matched test signatures.
+    if (hasLegitimateUserContent) {
+        if (testEvidenceReason) {
+            return {
+                isProbableTest: false,
+                isAuthorizedForDeletion: false,
+                reason: "Mixed-content session: contains legitimate user conversation alongside test records (fails closed to prevent data loss)",
+                samplePrompt,
+            };
+        }
+        return {
+            isProbableTest: false,
+            isAuthorizedForDeletion: false,
+            reason: "",
+            samplePrompt,
+        };
+    }
+
+    // Pure test session with verified test evidence
+    if (testEvidenceReason) {
+        return {
+            isProbableTest: true,
+            isAuthorizedForDeletion: true,
+            reason: testEvidenceReason,
+            samplePrompt,
+        };
+    }
+
     return {
         isProbableTest: false,
         isAuthorizedForDeletion: false,

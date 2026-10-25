@@ -38,11 +38,20 @@ export interface SessionPersistence {
  */
 export class ConversationMemoryOrchestrator implements SessionPersistence {
     private readonly inFlightIndexing = new Set<Promise<void>>();
-    private readonly queue: Array<() => Promise<void>> = [];
+    private readonly queue: Array<{
+        readonly run: () => Promise<void>;
+        readonly cancel: () => void;
+    }> = [];
+    private readonly activeControllers = new Set<AbortController>();
     private activeCount = 0;
+    private _isClosed = false;
     readonly maxConcurrency: number;
     readonly indexingTimeoutMs: number;
     private readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
+
+    get isClosed(): boolean {
+        return this._isClosed;
+    }
 
     constructor(
         private readonly store: ConversationStore,
@@ -81,7 +90,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
         items: readonly TranscriptItem[],
         startSequence: number,
     ): Promise<void> => {
-        if (items.length === 0) {
+        if (this._isClosed || items.length === 0) {
             return;
         }
 
@@ -105,6 +114,10 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
         endSequence: number,
         options?: { readonly signal?: AbortSignal },
     ): Promise<void> => {
+        if (this._isClosed) {
+            return;
+        }
+
         const derivedDoc = createMemoryDocumentFromTurn(turnItems, startSequence, endSequence);
 
         if (!derivedDoc || !this.embeddingProvider) {
@@ -114,7 +127,13 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
         const embeddingProvider = this.embeddingProvider;
 
         const runIndexing = async (): Promise<void> => {
+            if (this._isClosed) {
+                return;
+            }
+
             const controller = new AbortController();
+            this.activeControllers.add(controller);
+
             const timeoutId = setTimeout(() => {
                 controller.abort(new Error("Memory indexing timed out"));
             }, this.indexingTimeoutMs);
@@ -126,6 +145,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
             if (options?.signal) {
                 if (options.signal.aborted) {
                     clearTimeout(timeoutId);
+                    this.activeControllers.delete(controller);
                     return;
                 }
                 options.signal.addEventListener("abort", onParentAbort, { once: true });
@@ -137,7 +157,12 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                     controller.signal,
                     { taskType: "RETRIEVAL_DOCUMENT" },
                 );
-                if (!embedding || embedding.length === 0 || controller.signal.aborted) {
+                if (
+                    this._isClosed ||
+                    controller.signal.aborted ||
+                    !embedding ||
+                    embedding.length === 0
+                ) {
                     return;
                 }
 
@@ -152,6 +177,10 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                     embeddingModel: embeddingProvider.model,
                 });
             } catch (error) {
+                if (this._isClosed || controller.signal.aborted) {
+                    return;
+                }
+
                 // Graceful degradation: embedding indexing failure or timeout does not compromise conversation continuity
                 const isDebug =
                     typeof process !== "undefined" &&
@@ -176,6 +205,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                 }
             } finally {
                 clearTimeout(timeoutId);
+                this.activeControllers.delete(controller);
                 if (options?.signal) {
                     options.signal.removeEventListener("abort", onParentAbort);
                 }
@@ -190,34 +220,69 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
             this.inFlightIndexing.add(trackingPromise);
 
             const taskWrapper = async () => {
+                if (this._isClosed) {
+                    resolve();
+                    return;
+                }
                 try {
                     await runIndexing();
                     resolve();
                 } catch (err) {
-                    reject(err);
+                    if (this._isClosed) {
+                        resolve();
+                    } else {
+                        reject(err);
+                    }
                 } finally {
                     this.inFlightIndexing.delete(trackingPromise);
                     trackingResolve();
                 }
             };
 
-            this.queue.push(taskWrapper);
+            const cancel = () => {
+                this.inFlightIndexing.delete(trackingPromise);
+                trackingResolve();
+                resolve();
+            };
+
+            this.queue.push({ run: taskWrapper, cancel });
             this.drainQueue();
         });
     };
 
     private drainQueue = (): void => {
+        if (this._isClosed) {
+            return;
+        }
         while (this.activeCount < this.maxConcurrency && this.queue.length > 0) {
             const next = this.queue.shift();
             if (!next) {
                 break;
             }
             this.activeCount++;
-            void next().finally(() => {
+            void next.run().finally(() => {
                 this.activeCount--;
                 this.drainQueue();
             });
         }
+    };
+
+    /**
+     * Aborts all active indexing operations, clears queued tasks, and marks orchestrator as closed.
+     * Prevents any pending or future operations from attempting writes to SQLite.
+     */
+    cancelPending = (): void => {
+        this._isClosed = true;
+        for (const item of this.queue) {
+            item.cancel();
+        }
+        this.queue.length = 0;
+        for (const controller of this.activeControllers) {
+            try {
+                controller.abort(new Error("Memory indexing cancelled during shutdown"));
+            } catch {}
+        }
+        this.activeControllers.clear();
     };
 
     waitForPendingIndexing = async (timeoutMs = 5000): Promise<void> => {
@@ -233,5 +298,21 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
 
         await Promise.race([waitPromise, timeoutPromise]);
         clearTimeout(timer!);
+    };
+
+    /**
+     * Closes the memory orchestrator with bounded shutdown.
+     * Awaits in-flight indexing up to drainTimeoutMs (defaulting to the lesser of indexingTimeoutMs and 3000ms),
+     * and guarantees all remaining or queued operations are cancelled and aborted before returning.
+     */
+    close = async (drainTimeoutMs?: number): Promise<void> => {
+        const timeout = drainTimeoutMs ?? Math.min(this.indexingTimeoutMs, 3000);
+        try {
+            if (timeout > 0) {
+                await this.waitForPendingIndexing(timeout);
+            }
+        } finally {
+            this.cancelPending();
+        }
     };
 }

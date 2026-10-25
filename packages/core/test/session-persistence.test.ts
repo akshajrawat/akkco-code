@@ -356,6 +356,143 @@ test("F-006: waitForPendingIndexing drains active indexing operations cleanly", 
     await store.close();
 });
 
+test("ConversationMemoryOrchestrator: close() aborts slow in-flight indexing and prevents writes to closed database", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    let embedAborted = false;
+    let embedStarted = false;
+    let attemptedSaveAfterClose = false;
+
+    const originalSave = store.saveMemoryDocument.bind(store);
+    store.saveMemoryDocument = async (doc) => {
+        if (!store["db"]) {
+            attemptedSaveAfterClose = true;
+        }
+        return originalSave(doc);
+    };
+
+    const slowEmbedder: any = {
+        id: "slow-provider",
+        model: "slow-model",
+        embed: async (_texts: string[], signal?: AbortSignal) => {
+            embedStarted = true;
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    resolve([[0.1, 0.2, 0.3]]);
+                }, 200);
+
+                signal?.addEventListener("abort", () => {
+                    clearTimeout(timer);
+                    embedAborted = true;
+                    reject(signal.reason ?? new Error("Aborted"));
+                });
+            });
+        },
+    };
+
+    const orchestrator = new ConversationMemoryOrchestrator(store, slowEmbedder, 5000);
+
+    const runtime = createAkkcoRuntime({
+        id: "mock",
+        async *stream() {
+            yield { type: "text", content: "Response that triggers indexing" };
+        },
+    });
+
+    const session = new Session(runtime, [], {
+        id: "sess-abort-close",
+        persistence: orchestrator,
+    });
+
+    for await (const _ of session.send("Hello")) {
+    }
+
+    assert.equal(embedStarted, true, "Embedding must have started");
+
+    // Close orchestrator with short drain timeout (50ms), cutting off the 200ms task
+    await orchestrator.close(50);
+    assert.equal(orchestrator.isClosed, true);
+    assert.equal(embedAborted, true, "Active indexing AbortController must be aborted on close");
+
+    // Immediately close store
+    await store.close();
+
+    // Wait past the original 200ms duration to verify no late operations attempt to write to closed store
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.equal(attemptedSaveAfterClose, false, "Must not attempt to write to closed database");
+});
+
+test("ConversationMemoryOrchestrator: close() cancels queued indexing tasks and rejects post-close tasks", async () => {
+    const store = new SqliteConversationStore({ dbPath: ":memory:" });
+    await store.initialize();
+
+    let executedTasks = 0;
+    const slowEmbedder: any = {
+        id: "slow-provider",
+        model: "slow-model",
+        embed: async () => {
+            executedTasks++;
+            await new Promise((r) => setTimeout(r, 200));
+            return [[0.1, 0.2, 0.3]];
+        },
+    };
+
+    // Concurrency: 1
+    const orchestrator = new ConversationMemoryOrchestrator(store, slowEmbedder, {
+        indexingTimeoutMs: 5000,
+        maxConcurrency: 1,
+    });
+
+    // Enqueue two turn completed tasks
+    const p1 = orchestrator.onTurnCompleted(
+        "sess-q",
+        [
+            { type: "user", content: "Turn 1 user" },
+            { type: "assistant", content: "Turn 1 assistant", status: "completed" },
+        ],
+        0,
+        1,
+    );
+
+    const p2 = orchestrator.onTurnCompleted(
+        "sess-q",
+        [
+            { type: "user", content: "Turn 2 user" },
+            { type: "assistant", content: "Turn 2 assistant", status: "completed" },
+        ],
+        2,
+        3,
+    );
+
+    // Close orchestrator with 30ms drain timeout
+    await orchestrator.close(30);
+    assert.equal(orchestrator.isClosed, true);
+
+    // Store is closed immediately
+    await store.close();
+
+    // Verify both promises resolved without unhandled rejections
+    await Promise.all([p1, p2]);
+
+    // Second task was queued and must NOT have executed after close
+    assert.equal(executedTasks, 1, "Only task 1 started; task 2 was queued and cancelled");
+
+    // Post-close calls to onTurnCompleted must return immediately without queueing or executing
+    await orchestrator.onTurnCompleted(
+        "sess-q",
+        [
+            { type: "user", content: "Turn 3 user" },
+            { type: "assistant", content: "Turn 3 assistant", status: "completed" },
+        ],
+        4,
+        5,
+    );
+
+    assert.equal(executedTasks, 1, "Post-close turns must not execute indexing");
+});
+
 test("sessionPersistence: context trimming during request preparation leaves canonical in-memory transcript and SQLite transcript lossless", async () => {
     const store = new SqliteConversationStore({ dbPath: ":memory:" });
     await store.initialize();
