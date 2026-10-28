@@ -13,7 +13,7 @@
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "typecheck": "tsc --noEmit",
-        "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/*.test.ts\"",
+        "test": "tsx --test \"packages/*/test/**/*.test.ts\" \"apps/*/test/*.test.ts\" \"apps/*/test/config/*.test.ts\"",
         "test:tui": "tsx --test \"apps/cli/test/pty/**/*.test.ts\"",
         "clean:test-sessions": "tsx apps/cli/src/scripts/clean-test-sessions.ts",
         "test:gemini-smoke": "tsx packages/providers/test/gemini-api.smoke.test.ts",

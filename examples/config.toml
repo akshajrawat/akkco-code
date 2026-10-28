@@ -1,0 +1,50 @@
+# AKKCO Code Configuration Example
+# Documentation: docs/configuration.md
+#
+# Place this file at:
+#   Global (Linux/WSL):    ~/.config/akkco/config.toml
+#   Global (macOS):        ~/Library/Application Support/akkco/config.toml
+#   Global (Windows):      %APPDATA%\akkco\config.toml
+#   Project (Development): .akkco/config.toml
+
+[model]
+# Model identifier running on your inference server (e.g. Ollama or vLLM)
+name = "qwen2.5-coder:7b"
+
+# Provider identifier (openai-compatible for Ollama, vLLM, LM Studio, etc.)
+provider = "openai-compatible"
+
+# Local inference server endpoint
+base_url = "http://localhost:11434/v1"
+
+# Tool calling mode: "compatibility" (textual tool syntax) or "native" (API function calling)
+# For Qwen 2.5 Coder 7B, "compatibility" provides highest reliability
+tool_mode = "compatibility"
+
+[context]
+# Context limits must match your actual inference server configuration.
+# If running Ollama, ensure num_ctx matches window_tokens.
+window_tokens = 32768
+max_output_tokens = 2048
+safety_margin_tokens = 512
+chars_per_token = 4
+
+[embedding]
+# Optional cloud-hosted embeddings via Google Gemini.
+# Eliminates the need to run a local embedding model (e.g. nomic-embed-text).
+provider = "gemini"
+model = "gemini-embedding-001"
+dimensions = 768
+
+# Environment variable name holding the API key.
+# Store the actual key securely in credentials.env alongside your global config.toml:
+#   echo "GEMINI_API_KEY=your_key_here" >> ~/.config/akkco/credentials.env
+api_key_env = "GEMINI_API_KEY"
+
+[agent]
+# Maximum tool invocation iterations before yielding back to the user
+max_tool_iterations = 25
+# Threshold of identical calls before stopping loop (default: 3)
+# repeated_tool_call_limit = 3
+# Threshold of consecutive tool errors before stopping loop (default: 4)
+# consecutive_tool_error_limit = 4

@@ -2,6 +2,7 @@ import type { Session, TranscriptItem } from "@akkco/core";
 import type { ConversationStore } from "@akkco/retrieval";
 import type { ToolRegistry } from "@akkco/tools";
 import type { CliMetadata, HistoryItemPayload, ToolExecutionState } from "../state/types.js";
+import { configCommands } from "./config-commands.js";
 import { sessionCommands } from "./session-commands.js";
 import { toolCommands } from "./tool-commands.js";
 
@@ -112,4 +113,6 @@ export const createBuiltinCommandRegistry = () => {
     return createCommandRegistry([...sessionCommands, ...toolCommands]);
 };
 
-export const createDefaultCommandRegistry = createBuiltinCommandRegistry;
+export const createDefaultCommandRegistry = () => {
+    return createCommandRegistry([...sessionCommands, ...toolCommands, ...configCommands]);
+};

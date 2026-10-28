@@ -248,6 +248,10 @@ export const startTui = async (options: PtyHarnessOptions = {}): Promise<PtyHarn
             FORCE_COLOR: "1",
             ...options.env,
             AKKCO_DB_PATH: options.env?.AKKCO_DB_PATH ?? dbPath,
+            AKKCO_GLOBAL_CONFIG:
+                options.env?.AKKCO_GLOBAL_CONFIG ?? path.join(tmpDir, "isolated-global.toml"),
+            AKKCO_PROJECT_CONFIG:
+                options.env?.AKKCO_PROJECT_CONFIG ?? path.join(tmpDir, "isolated-project.toml"),
         },
     });
 

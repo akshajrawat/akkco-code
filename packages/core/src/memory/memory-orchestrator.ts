@@ -14,6 +14,7 @@ export interface ConversationMemoryOrchestratorOptions {
     readonly indexingTimeoutMs?: number;
     readonly maxConcurrency?: number;
     readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
+    readonly debug?: boolean;
 }
 
 export interface SessionPersistence {
@@ -48,6 +49,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
     readonly maxConcurrency: number;
     readonly indexingTimeoutMs: number;
     private readonly onDiagnostic?: (diagnostic: MemoryIndexingDiagnostic) => void;
+    private readonly debug?: boolean;
 
     get isClosed(): boolean {
         return this._isClosed;
@@ -79,6 +81,7 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
                     ? indexingTimeoutOrOptions.maxConcurrency
                     : 1;
             this.onDiagnostic = indexingTimeoutOrOptions.onDiagnostic;
+            this.debug = indexingTimeoutOrOptions.debug;
         } else {
             this.indexingTimeoutMs = defaultTimeout;
             this.maxConcurrency = 1;
@@ -183,9 +186,10 @@ export class ConversationMemoryOrchestrator implements SessionPersistence {
 
                 // Graceful degradation: embedding indexing failure or timeout does not compromise conversation continuity
                 const isDebug =
-                    typeof process !== "undefined" &&
-                    (process.env.AKKCO_EMBEDDING_DEBUG === "true" ||
-                        process.env.AKKCO_DEBUG === "true");
+                    this.debug ??
+                    (typeof process !== "undefined" &&
+                        (process.env.AKKCO_EMBEDDING_DEBUG === "true" ||
+                            process.env.AKKCO_DEBUG === "true"));
 
                 if (this.onDiagnostic || isDebug) {
                     const rawMsg = error instanceof Error ? error.message : String(error);

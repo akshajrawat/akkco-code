@@ -61,6 +61,7 @@ export {
     type ConversationMemoryCandidate,
     type ConversationMemoryRetriever,
     type ConversationMemoryRetrieveOptions,
+    type ConversationMemoryRetrieverOptions,
     type QueryEmbedding,
     type MemoryRetrievalDiagnostic,
 } from "./memory/memory-retriever.js";

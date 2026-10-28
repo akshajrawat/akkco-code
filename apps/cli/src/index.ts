@@ -3,18 +3,13 @@ import { createTextToolCompatibilityProvider, OpenAICompatibleProvider } from "@
 import { createRepositoryTools, createToolRegistry } from "@akkco/tools";
 import { readFile } from "node:fs/promises";
 import process, { stdin, stdout } from "node:process";
+import { createDefaultCommandRegistry } from "./commands/command-registry.js";
+import { handleConfigCommand } from "./commands/config-cli.js";
 import {
-    DEFAULT_MODEL,
     EmbeddingConfigurationError,
-    parseCharsPerToken,
-    parseContextWindowTokens,
-    parseMaxOutputTokens,
-    parseMaxToolIterations,
-    parseSafetyMarginTokens,
-    parseToolMode,
-    resolveCliModelProfile,
+    resolveConfig,
     resolveEmbeddingProvider,
-} from "./config.js";
+} from "./config/index.js";
 import { runPlainCli } from "./plain-cli.js";
 import { createCliController } from "./state/cli-controller.js";
 import type { CliMetadata } from "./state/types.js";
@@ -37,40 +32,36 @@ process.emitWarning = function (warning: string | Error, ...args: unknown[]) {
 };
 
 const main = async () => {
-    const toolModeOverride = process.env.AKKCO_TOOL_MODE
-        ? parseToolMode(process.env.AKKCO_TOOL_MODE)
-        : undefined;
-    const maxToolIterations = parseMaxToolIterations(process.env.AKKCO_MAX_TOOL_ITERATIONS);
-    const contextWindowTokens = parseContextWindowTokens(process.env.AKKCO_CONTEXT_WINDOW_TOKENS);
-    const maxOutputTokens = parseMaxOutputTokens(process.env.AKKCO_MAX_OUTPUT_TOKENS);
-    const safetyMarginTokens = parseSafetyMarginTokens(process.env.AKKCO_SAFETY_MARGIN_TOKENS);
-    const charsPerToken = parseCharsPerToken(process.env.AKKCO_CHARS_PER_TOKEN);
+    // Dispatch shell-level config management commands if requested
+    const args = process.argv.slice(2);
+    if (args[0] === "config") {
+        const exitCode = await handleConfigCommand(args.slice(1));
+        process.exit(exitCode);
+    }
 
-    const model = process.env.AKKCO_MODEL ?? DEFAULT_MODEL;
+    const resolved = await resolveConfig({ cwd: process.cwd() });
+    const effectiveConfig = resolved.config;
+    const effectiveProfile = resolved.profile;
+    const effectiveEnv = resolved.env;
 
-    const effectiveProfile = resolveCliModelProfile(model, {
-        toolMode: toolModeOverride,
-        contextWindowTokens,
-        maxOutputTokens,
-        safetyMarginTokens,
-        charsPerToken,
-    });
+    const model = effectiveConfig.model.name;
+    const maxToolIterations = effectiveConfig.agent.max_tool_iterations;
 
     let nativeProvider: ModelProvider;
     let providerName = "OpenAICompatible";
 
-    if (process.env.AKKCO_TEST_PROVIDER) {
+    if (effectiveEnv.AKKCO_TEST_PROVIDER) {
         const testProviderModule =
-            process.env.AKKCO_TEST_PROVIDER === "1" || process.env.AKKCO_TEST_PROVIDER === "true"
+            effectiveEnv.AKKCO_TEST_PROVIDER === "1" || effectiveEnv.AKKCO_TEST_PROVIDER === "true"
                 ? await import("../test/pty/test-provider.js")
-                : await import(process.env.AKKCO_TEST_PROVIDER);
+                : await import(effectiveEnv.AKKCO_TEST_PROVIDER);
         nativeProvider = testProviderModule.createDeterministicTestProvider();
         providerName = "DeterministicTestProvider";
     } else {
         nativeProvider = new OpenAICompatibleProvider({
-            baseUrl: process.env.AKKCO_BASE_URL ?? "http://localhost:11434/v1",
+            baseUrl: effectiveConfig.model.base_url,
             model,
-            apiKey: process.env.AKKCO_API_KEY,
+            apiKey: effectiveConfig.model.api_key,
         });
     }
 
@@ -92,13 +83,13 @@ const main = async () => {
     );
 
     const isTestMode = Boolean(
-        process.env.AKKCO_TEST_PROVIDER ||
-        process.env.AKKCO_TEST_MODE === "1" ||
-        process.env.NODE_ENV === "test" ||
-        process.env.NODE_TEST_CONTEXT,
+        effectiveEnv.AKKCO_TEST_PROVIDER ||
+        effectiveEnv.AKKCO_TEST_MODE === "1" ||
+        effectiveEnv.NODE_ENV === "test" ||
+        effectiveEnv.NODE_TEST_CONTEXT,
     );
 
-    let dbPath = process.env.AKKCO_DB_PATH;
+    let dbPath = effectiveEnv.AKKCO_DB_PATH;
     if (!dbPath) {
         dbPath = isTestMode ? ":memory:" : defaultProdDbPath;
     } else if (isTestMode && dbPath === defaultProdDbPath) {
@@ -115,7 +106,7 @@ const main = async () => {
     try {
         await store.initialize();
     } catch (error) {
-        if (dbPath === ":memory:" || process.env.AKKCO_ALLOW_EPHEMERAL === "true") {
+        if (dbPath === ":memory:" || effectiveEnv.AKKCO_ALLOW_EPHEMERAL === "true") {
             store = undefined;
         } else {
             throw new Error(
@@ -127,7 +118,11 @@ const main = async () => {
     if (store) {
         let embeddingProvider: import("@akkco/models").EmbeddingProvider | undefined;
         try {
-            embeddingProvider = await resolveEmbeddingProvider({ env: process.env });
+            embeddingProvider = await resolveEmbeddingProvider({
+                env: effectiveEnv,
+                config: effectiveConfig.embedding,
+                modelConfig: effectiveConfig.model,
+            });
         } catch (error) {
             if (error instanceof EmbeddingConfigurationError) {
                 throw error;
@@ -137,10 +132,16 @@ const main = async () => {
             );
         }
 
+        const isDebug =
+            effectiveEnv.AKKCO_EMBEDDING_DEBUG === "true" || effectiveEnv.AKKCO_DEBUG === "true";
         const { ConversationMemoryOrchestrator, DefaultConversationMemoryRetriever } =
             await import("@akkco/core");
-        orchestrator = new ConversationMemoryOrchestrator(store, embeddingProvider);
-        retriever = new DefaultConversationMemoryRetriever(store, embeddingProvider);
+        orchestrator = new ConversationMemoryOrchestrator(store, embeddingProvider, {
+            debug: isDebug,
+        });
+        retriever = new DefaultConversationMemoryRetriever(store, embeddingProvider, {
+            debug: isDebug,
+        });
     }
 
     const manifest = JSON.parse(
@@ -155,7 +156,7 @@ const main = async () => {
         cwd: process.cwd(),
     };
 
-    const sessionId = process.env.AKKCO_SESSION_ID ?? (await import("node:crypto")).randomUUID();
+    const sessionId = effectiveEnv.AKKCO_SESSION_ID ?? (await import("node:crypto")).randomUUID();
     const contextBudget = deriveContextBudget(effectiveProfile);
     const { createBoundedContextCompiler, createContextCompactor } = await import("@akkco/core");
     const compactor = createContextCompactor({
@@ -173,10 +174,24 @@ const main = async () => {
         });
     const compiler = createCompiler(sessionId);
 
+    const reliabilityOptions: import("@akkco/core").RuntimeReliabilityOptions = {};
+    if (effectiveConfig.agent.max_tool_iterations !== undefined) {
+        reliabilityOptions.maxToolIterations = effectiveConfig.agent.max_tool_iterations;
+    }
+    if (effectiveConfig.agent.repeated_tool_call_limit !== undefined) {
+        reliabilityOptions.repeatedToolCallLimit = effectiveConfig.agent.repeated_tool_call_limit;
+    }
+    if (effectiveConfig.agent.consecutive_tool_error_limit !== undefined) {
+        reliabilityOptions.consecutiveToolErrorLimit =
+            effectiveConfig.agent.consecutive_tool_error_limit;
+    }
+
     const controller = createCliController({
         provider,
+        commandRegistry: createDefaultCommandRegistry(),
         toolRegistry: createToolRegistry(createRepositoryTools(process.cwd())),
-        reliabilityOptions: maxToolIterations !== undefined ? { maxToolIterations } : undefined,
+        reliabilityOptions:
+            Object.keys(reliabilityOptions).length > 0 ? reliabilityOptions : undefined,
         compiler,
         createCompiler,
         persistence: orchestrator,

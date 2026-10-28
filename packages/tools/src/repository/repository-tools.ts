@@ -1,10 +1,17 @@
 import { createListFilesTool } from "./filesystem/list-files.js";
 import { createReadFileTool } from "./filesystem/read-file.js";
-import { createSearchTextTool } from "./filesystem/search-text.js";
+import { createSearchTextTool, type SearchTextOptions } from "./filesystem/search-text.js";
 import type { AnyToolDefinition } from "../core/types.js";
 
-export const createRepositoryTools = (repositoryRoot: string): AnyToolDefinition[] => [
+export interface RepositoryToolsOptions {
+    readonly searchText?: SearchTextOptions;
+}
+
+export const createRepositoryTools = (
+    repositoryRoot: string,
+    options?: RepositoryToolsOptions,
+): AnyToolDefinition[] => [
     createReadFileTool(repositoryRoot),
     createListFilesTool(repositoryRoot),
-    createSearchTextTool(repositoryRoot),
+    createSearchTextTool(repositoryRoot, options?.searchText),
 ];

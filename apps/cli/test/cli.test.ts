@@ -5,6 +5,7 @@ import { createToolRegistry } from "@akkco/tools";
 import assert from "node:assert";
 import { type ChildProcess, spawn } from "node:child_process";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,11 +24,14 @@ const spawnTestCli = (
         stdio?: ["pipe", "pipe", "pipe"];
     } = {},
 ) => {
+    const isolatedNonexistentPath = path.join(os.tmpdir(), "akkco-test-isolated-nonexistent.toml");
     const finalEnv: Record<string, string> = {
         ...process.env,
         NODE_ENV: "test",
         AKKCO_TEST_MODE: "1",
         AKKCO_DB_PATH: ":memory:",
+        AKKCO_GLOBAL_CONFIG: isolatedNonexistentPath,
+        AKKCO_PROJECT_CONFIG: isolatedNonexistentPath,
     };
 
     if (options.env) {

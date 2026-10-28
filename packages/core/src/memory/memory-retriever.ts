@@ -35,12 +35,28 @@ export interface ConversationMemoryRetriever {
     embedQuery(text: string, signal?: AbortSignal): Promise<QueryEmbedding | null>;
 }
 
+export interface ConversationMemoryRetrieverOptions {
+    readonly onDiagnostic?: (diagnostic: MemoryRetrievalDiagnostic) => void;
+    readonly debug?: boolean;
+}
+
 export class DefaultConversationMemoryRetriever implements ConversationMemoryRetriever {
+    private readonly onDiagnostic?: (diagnostic: MemoryRetrievalDiagnostic) => void;
+    private readonly debug?: boolean;
+
     constructor(
         private readonly store: ConversationStore,
         private readonly embeddingProvider?: EmbeddingProvider,
-        private readonly onDiagnostic?: (diagnostic: MemoryRetrievalDiagnostic) => void,
-    ) {}
+        onDiagnosticOrOptions?:
+            ((diagnostic: MemoryRetrievalDiagnostic) => void) | ConversationMemoryRetrieverOptions,
+    ) {
+        if (typeof onDiagnosticOrOptions === "function") {
+            this.onDiagnostic = onDiagnosticOrOptions;
+        } else if (onDiagnosticOrOptions && typeof onDiagnosticOrOptions === "object") {
+            this.onDiagnostic = onDiagnosticOrOptions.onDiagnostic;
+            this.debug = onDiagnosticOrOptions.debug;
+        }
+    }
 
     /**
      * Generates an embedding vector for search queries, capturing provider identity
@@ -78,9 +94,10 @@ export class DefaultConversationMemoryRetriever implements ConversationMemoryRet
             }
             // Embedding endpoint unavailable/failed: degrade gracefully
             const isDebug =
-                typeof process !== "undefined" &&
-                (process.env.AKKCO_EMBEDDING_DEBUG === "true" ||
-                    process.env.AKKCO_DEBUG === "true");
+                this.debug ??
+                (typeof process !== "undefined" &&
+                    (process.env.AKKCO_EMBEDDING_DEBUG === "true" ||
+                        process.env.AKKCO_DEBUG === "true"));
 
             if (this.onDiagnostic || isDebug) {
                 const rawMsg = error instanceof Error ? error.message : String(error);
