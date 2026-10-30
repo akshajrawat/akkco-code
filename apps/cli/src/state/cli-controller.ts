@@ -30,7 +30,7 @@ export const createCliController = ({
     budget,
     store,
     metadata,
-    milestones,
+    summarizerProvider,
 }: CliControllerOptions) => {
     let state: CliViewState = {
         history: [],
@@ -122,7 +122,7 @@ export const createCliController = ({
                 budget,
                 compactor,
                 profile,
-                milestones,
+                summarizerProvider: summarizerProvider ?? provider,
             }),
             transcript,
             {

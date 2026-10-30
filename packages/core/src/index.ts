@@ -40,7 +40,6 @@ export {
     type ContextCompactorOptions,
     type StructuredSummary,
     type CompactHistoryOptions,
-    type CompactToolResultOptions,
     type CompactionProgressEvent,
     type CompactionProgressListener,
 } from "./context/context-compactor.js";
@@ -91,4 +90,5 @@ export {
     reconstructContextWithMilestones,
     recoverMilestoneEvidence,
     findMilestoneByCallId,
+    normalizeLegacyToolExecutionToMilestone,
 } from "./context/milestone-context.js";

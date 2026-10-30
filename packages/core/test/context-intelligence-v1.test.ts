@@ -146,23 +146,17 @@ test("Group A1: Compaction fires when an active tool output exceeds available ca
         events.push(event);
     }
 
-    assert.ok(compactorInvoked, "Expected compactor to be invoked for oversized tool output");
     assert.equal(providerCalls, 2, "Expected 2 provider calls (tool call + final answer)");
 
-    // Verify the second model request received the compacted tool result in workingItems
+    // Verify the second model request received the milestone evidence item
     const secondReq = recordedRequests[1];
-    const toolResultItem = secondReq.items.find((item) => item.type === "tool_result");
-    assert.ok(toolResultItem, "Expected tool_result item in second request");
-    if (toolResultItem.type === "tool_result") {
-        assert.ok(
-            toolResultItem.content.includes("Compact summary"),
-            "Expected working tool result to contain compacted summary",
-        );
-        assert.ok(
-            toolResultItem.content.includes("[Canonical transcript retains full original output"),
-            "Expected working tool result to contain canonical provenance note",
-        );
-    }
+    const milestoneItem = secondReq.items.find(
+        (item) =>
+            item.type === "message" &&
+            item.role === "user" &&
+            item.content.includes("[Milestone: read_file"),
+    );
+    assert.ok(milestoneItem, "Expected milestone evidence item in second request");
 
     // Verify runtime event emitted the full uncompacted content to session / user
     const toolEvent = events.find((e) => e.type === "tool_execution");
@@ -171,66 +165,7 @@ test("Group A1: Compaction fires when an active tool output exceeds available ca
         toolEvent.result.includes("Very large file content line"),
         "Expected runtime tool_execution event to preserve raw content",
     );
-});
-
-test("Group A2: Compaction strictly respects target budget (zero 1.5x tolerance)", async () => {
-    // When compactor returns output exceeding targetTokens, compactToolResult must return null
-    const oversizeProvider = createFakeProvider(async () => {
-        return (async function* () {
-            // Generates ~200 tokens
-            yield {
-                type: "text",
-                content: "Excessive summary words ".repeat(40),
-            } as ModelEvent;
-        })();
-    });
-
-    const compactor = new DefaultContextCompactor({
-        provider: oversizeProvider,
-    });
-
-    const result = await compactor.compactToolResult({
-        toolName: "read_file",
-        callId: "c1",
-        content: "Huge raw content ".repeat(100),
-        targetTokens: 40, // very tight target
-    });
-
-    assert.equal(
-        result,
-        null,
-        "Expected compactToolResult to fail closed (return null) when summary exceeds targetTokens",
-    );
-});
-
-test("Group A3: Structured compaction output preserves tool metadata and omission note", async () => {
-    const compactorProvider = createFakeProvider(async () => {
-        return (async function* () {
-            yield {
-                type: "text",
-                content:
-                    "read_file for path 'src/index.ts' succeeded. Found 12 exports, exitCode 0. 500 lines of details omitted.",
-            } as ModelEvent;
-        })();
-    });
-
-    const compactor = new DefaultContextCompactor({
-        provider: compactorProvider,
-    });
-
-    const compacted = await compactor.compactToolResult({
-        toolName: "read_file",
-        callId: "call-99",
-        content: "Export lines ".repeat(100),
-        targetTokens: 120,
-    });
-
-    assert.ok(compacted !== null);
-    assert.ok(compacted.includes("[Summary of read_file (call-99)]:"));
-    assert.ok(compacted.includes("src/index.ts"));
-    assert.ok(compacted.includes("exitCode 0"));
-    assert.ok(compacted.includes("[Canonical transcript retains full original output"));
-    assert.ok(compacted.includes("Details omitted for token budget."));
+    assert.ok(toolEvent.milestone, "Expected milestone on tool_execution event");
 });
 
 test("Group A4: Session transcript and SQLite storage retain the original uncompacted tool output", async () => {
@@ -562,56 +497,6 @@ test("Group C1: Compactor chunks large historical turns exceeding compactor capa
         requestsCount > 1,
         `Expected compactor to chunk turns across multiple requests, got ${requestsCount}`,
     );
-});
-
-test("Group C2: Compactor chunks oversized tool results exceeding compactor capacity line-by-line and merges", async () => {
-    let toolCompactorRequests = 0;
-    const compactorProvider = createFakeProvider(async (req) => {
-        toolCompactorRequests++;
-        assert.equal(req.tools, undefined, "Compaction requests must have tools: undefined");
-
-        return (async function* () {
-            yield {
-                type: "text",
-                content: `Extracted summary for chunk ${toolCompactorRequests}: path/to/file.ts:10.`,
-            } as ModelEvent;
-        })();
-    });
-
-    // Profile with small capacity: 400 - 100 - 50 = 250 maxInputTokens
-    const smallProfile: ModelProfile = {
-        id: "small-compactor",
-        contextWindowTokens: 400,
-        maxOutputTokens: 100,
-        safetyMarginTokens: 50,
-        toolMode: "native",
-        charsPerToken: 4,
-    };
-
-    const compactor = new DefaultContextCompactor({
-        provider: compactorProvider,
-        profile: smallProfile,
-    });
-
-    // 80 lines of 30 chars each = 2400 chars = 600 tokens > 250 maxInputTokens
-    const hugeToolOutput = Array.from(
-        { length: 80 },
-        (_, i) => `Line ${i}: log entry with data`,
-    ).join("\n");
-
-    const compacted = await compactor.compactToolResult({
-        toolName: "read_file",
-        callId: "call-c2",
-        content: hugeToolOutput,
-        targetTokens: 100,
-    });
-
-    assert.ok(compacted !== null);
-    assert.ok(
-        toolCompactorRequests > 1,
-        `Expected multiple chunk requests for oversized tool output, got ${toolCompactorRequests}`,
-    );
-    assert.ok(compacted.includes("[Summary of read_file (call-c2)]:"));
 });
 
 test("Group C3: Compaction model requests never supply tools", async () => {
@@ -1023,57 +908,6 @@ test("Group G2: Single historical item larger than chunk capacity is sliced safe
 
     assert.ok(summary !== null, "Oversized single item must be summarized successfully");
     assert.ok(recordedRequests.length > 1, "Must slice oversized item into multiple requests");
-
-    for (const req of recordedRequests) {
-        const tokens = req.items.reduce(
-            (sum, it) => sum + (it.type === "message" ? Math.ceil(it.content.length / 4) + 4 : 4),
-            0,
-        );
-        assert.ok(tokens <= 250, `Request tokens (${tokens}) must be <= 250`);
-    }
-});
-
-test("Group G3: Single extremely long tool-result line is sliced safely without sending oversized request", async () => {
-    const recordedRequests: ModelRequest[] = [];
-    const compactorProvider = createStrictFakeProvider(
-        250,
-        async () => {
-            return (async function* () {
-                yield {
-                    type: "text",
-                    content: "Extracted summary of long tool line.",
-                } as ModelEvent;
-            })();
-        },
-        recordedRequests,
-    );
-
-    const smallProfile: ModelProfile = {
-        id: "small-compactor-strict",
-        contextWindowTokens: 400,
-        maxOutputTokens: 100,
-        safetyMarginTokens: 50,
-        toolMode: "native",
-        charsPerToken: 4,
-    };
-
-    const compactor = new DefaultContextCompactor({
-        provider: compactorProvider,
-        profile: smallProfile,
-    });
-
-    // Single line of 3,000 characters without newlines (~750 tokens > 250 capacity)
-    const singleLongLine = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(80);
-
-    const compacted = await compactor.compactToolResult({
-        toolName: "read_file",
-        callId: "call-single-line",
-        content: singleLongLine,
-        targetTokens: 100,
-    });
-
-    assert.ok(compacted !== null, "Oversized single line tool result must be compacted");
-    assert.ok(recordedRequests.length > 1, "Must slice single line across multiple chunk requests");
 
     for (const req of recordedRequests) {
         const tokens = req.items.reduce(

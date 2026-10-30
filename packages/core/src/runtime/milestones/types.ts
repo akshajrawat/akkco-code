@@ -1,5 +1,35 @@
+import type { ModelProfile, ModelProvider } from "@akkco/models";
+import type { ContextBudget } from "../../context/budget.js";
+
 export type MilestoneExecutionStatus = "completed" | "failed" | "cancelled";
 export type MilestoneProcessingStatus = "pending" | "completed" | "failed";
+
+export interface ProcessToolMilestoneOptions {
+    readonly parentGoal: string;
+    readonly parentGoalId: string;
+    readonly callId: string;
+    readonly toolName: string;
+    readonly arguments: unknown;
+    readonly rawResult?: string;
+    readonly error?: string;
+    readonly executionStatus: MilestoneExecutionStatus;
+    readonly durationMs?: number;
+    readonly signal?: AbortSignal;
+    readonly profile?: ModelProfile;
+}
+
+export interface MilestoneProcessorOptions {
+    readonly provider?: ModelProvider;
+    readonly profile?: ModelProfile;
+    readonly budget?: ContextBudget;
+    readonly maxMilestoneTokens?: number;
+    readonly deterministicThresholdTokens?: number;
+    readonly charsPerToken?: number;
+}
+
+export interface MilestoneProcessor {
+    processToolExecution(options: ProcessToolMilestoneOptions): Promise<ToolMilestone>;
+}
 
 export interface ToolMilestone {
     readonly id: string;

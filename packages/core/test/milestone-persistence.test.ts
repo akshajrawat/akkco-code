@@ -43,7 +43,6 @@ test("Persistence: Canonical transcripts persist tool executions with raw result
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const session = createAkkcoSession(runtime, [], {
@@ -132,7 +131,6 @@ test("Persistence: History RAG is executed once per user turn and not repeated d
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const mockCompiler = {

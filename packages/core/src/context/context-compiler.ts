@@ -1,6 +1,9 @@
 import type { ModelItem } from "@akkco/models";
 import type { TranscriptItem } from "../transcript/types.js";
-import { formatMilestoneAsModelItem } from "./milestone-context.js";
+import {
+    formatMilestoneAsModelItem,
+    normalizeLegacyToolExecutionToMilestone,
+} from "./milestone-context.js";
 
 export const AGENT_POLICY = `Repository behavior:
 - Use repository tools only when the request depends on repository contents.
@@ -11,12 +14,13 @@ export const AGENT_POLICY = `Repository behavior:
 export interface CompileContextOptions {
     includePolicy?: boolean;
     policy?: string;
-    useMilestones?: boolean;
 }
 
 /**
  * Compiles a raw canonical transcript into a provider-neutral ModelItem sequence,
- * injecting policy and converting transcript statuses into appropriate message and tool items.
+ * injecting policy and converting transcript statuses into appropriate message and milestone items.
+ * Milestone processing is always enabled; historical tool records without milestones are normalized
+ * to preserve bounded context and avoid replaying raw outputs.
  */
 export const compileContext = (
     transcript: TranscriptItem[],
@@ -26,7 +30,6 @@ export const compileContext = (
 
     const includePolicy = options?.includePolicy ?? true;
     const policyText = options?.policy ?? AGENT_POLICY;
-    const useMilestones = options?.useMilestones ?? false;
 
     const alreadyHasPolicy = transcript.some(
         (item) => item.type === "system" && item.content.includes("Repository behavior:"),
@@ -96,47 +99,8 @@ export const compileContext = (
                 break;
             }
             case "tool_execution": {
-                if (useMilestones && item.milestone) {
-                    items.push(formatMilestoneAsModelItem(item.milestone));
-                    break;
-                }
-
-                items.push({
-                    type: "tool_call",
-                    id: item.callId,
-                    name: item.toolName,
-                    arguments: item.arguments,
-                });
-
-                if (item.status === "completed") {
-                    items.push({
-                        type: "tool_result",
-                        callId: item.callId,
-                        content: item.result ?? "",
-                    });
-                } else if (item.status === "failed") {
-                    items.push({
-                        type: "tool_result",
-                        callId: item.callId,
-                        content: item.error ?? "Tool execution failed",
-                        isError: true,
-                    });
-                } else if (item.status === "cancelled") {
-                    items.push({
-                        type: "tool_result",
-                        callId: item.callId,
-                        content: "Tool execution cancelled",
-                        isError: true,
-                    });
-                } else {
-                    // Reconcile requested or running incomplete execution from interrupted session
-                    items.push({
-                        type: "tool_result",
-                        callId: item.callId,
-                        content: "Tool execution was interrupted before completion",
-                        isError: true,
-                    });
-                }
+                const milestone = item.milestone ?? normalizeLegacyToolExecutionToMilestone(item);
+                items.push(formatMilestoneAsModelItem(milestone));
                 break;
             }
         }

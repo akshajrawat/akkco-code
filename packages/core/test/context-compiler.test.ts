@@ -95,7 +95,7 @@ test("compileContext: failed assistant includes partial message (if any) and fai
     ]);
 });
 
-test("compileContext: completed tool execution emits ModelToolCall and ModelToolResult", () => {
+test("compileContext: completed tool execution emits milestone ModelItem", () => {
     const transcript: ToolExecutionTranscriptItem[] = [
         {
             type: "tool_execution",
@@ -108,22 +108,49 @@ test("compileContext: completed tool execution emits ModelToolCall and ModelTool
         },
     ];
     const items = compileWithoutPolicy(transcript);
-    assert.deepStrictEqual(items, [
-        {
-            type: "tool_call",
-            id: "call_1",
-            name: "read_file",
-            arguments: { path: "src/index.ts" },
-        },
-        {
-            type: "tool_result",
-            callId: "call_1",
-            content: "console.log('hello');",
-        },
-    ]);
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(items[0].type, "message");
+    assert.strictEqual(items[0].role, "user");
+    assert.strictEqual((items[0] as any).isPolicy, false);
+    assert.ok(items[0].content.includes('[Milestone: read_file (call_id: "call_1")'));
 });
 
-test("compileContext: failed tool execution emits ModelToolCall and ModelToolResult with isError", () => {
+test("compileContext: tool execution with explicit milestone preserves complete milestone evidence", () => {
+    const transcript: ToolExecutionTranscriptItem[] = [
+        {
+            type: "tool_execution",
+            callId: "call_m1",
+            toolName: "search_text",
+            arguments: { query: "export" },
+            result: "index.ts:1:export const a = 1;",
+            status: "completed",
+            durationMs: 12,
+            milestone: {
+                id: "milestone-call_m1",
+                parentGoalId: "goal-1",
+                callId: "call_m1",
+                toolName: "search_text",
+                arguments: { query: "export" },
+                executionStatus: "completed",
+                processingStatus: "completed",
+                summary: "Found export declaration",
+                findings: ["Exported symbol a in index.ts:1"],
+                sourceLocations: ["index.ts:1"],
+                evidenceRefs: ["call:call_m1"],
+                estimatedTokens: 30,
+            },
+        },
+    ];
+    const items = compileWithoutPolicy(transcript);
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(items[0].type, "message");
+    assert.strictEqual(items[0].role, "user");
+    assert.ok(items[0].content.includes('[Milestone: search_text (call_id: "call_m1")'));
+    assert.ok(items[0].content.includes("Found export declaration"));
+    assert.ok(items[0].content.includes("index.ts:1"));
+});
+
+test("compileContext: failed tool execution emits milestone ModelItem with failure summary", () => {
     const transcript: ToolExecutionTranscriptItem[] = [
         {
             type: "tool_execution",
@@ -136,23 +163,16 @@ test("compileContext: failed tool execution emits ModelToolCall and ModelToolRes
         },
     ];
     const items = compileWithoutPolicy(transcript);
-    assert.deepStrictEqual(items, [
-        {
-            type: "tool_call",
-            id: "call_2",
-            name: "read_file",
-            arguments: { path: "missing.txt" },
-        },
-        {
-            type: "tool_result",
-            callId: "call_2",
-            content: "File not found: missing.txt",
-            isError: true,
-        },
-    ]);
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(items[0].type, "message");
+    assert.strictEqual(items[0].role, "user");
+    assert.ok(
+        items[0].content.includes('[Milestone: read_file (call_id: "call_2") - Execution: failed'),
+    );
+    assert.ok(items[0].content.includes("File not found: missing.txt"));
 });
 
-test("compileContext: cancelled tool execution emits ModelToolCall and ModelToolResult with isError", () => {
+test("compileContext: cancelled tool execution emits milestone ModelItem with cancelled status", () => {
     const transcript: ToolExecutionTranscriptItem[] = [
         {
             type: "tool_execution",
@@ -163,23 +183,17 @@ test("compileContext: cancelled tool execution emits ModelToolCall and ModelTool
         },
     ];
     const items = compileWithoutPolicy(transcript);
-    assert.deepStrictEqual(items, [
-        {
-            type: "tool_call",
-            id: "call_3",
-            name: "search_text",
-            arguments: { query: "foo" },
-        },
-        {
-            type: "tool_result",
-            callId: "call_3",
-            content: "Tool execution cancelled",
-            isError: true,
-        },
-    ]);
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(items[0].type, "message");
+    assert.strictEqual(items[0].role, "user");
+    assert.ok(
+        items[0].content.includes(
+            '[Milestone: search_text (call_id: "call_3") - Execution: cancelled',
+        ),
+    );
 });
 
-test("compileContext: requested and running tool execution reconciles with interrupted tool_result", () => {
+test("compileContext: requested and running tool execution compiles to milestone items", () => {
     const requestedItem: ToolExecutionTranscriptItem = {
         type: "tool_execution",
         callId: "call_4",
@@ -196,32 +210,9 @@ test("compileContext: requested and running tool execution reconciles with inter
     };
 
     const items = compileWithoutPolicy([requestedItem, runningItem]);
-    assert.deepStrictEqual(items, [
-        {
-            type: "tool_call",
-            id: "call_4",
-            name: "list_files",
-            arguments: { path: "." },
-        },
-        {
-            type: "tool_result",
-            callId: "call_4",
-            content: "Tool execution was interrupted before completion",
-            isError: true,
-        },
-        {
-            type: "tool_call",
-            id: "call_5",
-            name: "list_files",
-            arguments: { path: "src" },
-        },
-        {
-            type: "tool_result",
-            callId: "call_5",
-            content: "Tool execution was interrupted before completion",
-            isError: true,
-        },
-    ]);
+    assert.strictEqual(items.length, 2);
+    assert.ok((items[0] as any).content.includes('[Milestone: list_files (call_id: "call_4")'));
+    assert.ok((items[1] as any).content.includes('[Milestone: list_files (call_id: "call_5")'));
 });
 
 test("compileContext F-017: incomplete tool record followed by interruption and new user message preserves valid sequencing", () => {
@@ -240,27 +231,18 @@ test("compileContext F-017: incomplete tool record followed by interruption and 
 
     const items = compileWithoutPolicy(transcript);
 
-    // Verify tool_call is reconciled before the interrupted notice and next user message
-    assert.strictEqual(items.length, 5);
+    // Verify milestone is compiled before the interrupted notice and next user message
+    assert.strictEqual(items.length, 4);
     assert.deepStrictEqual(items[0], { type: "message", role: "user", content: "list files" });
-    assert.deepStrictEqual(items[1], {
-        type: "tool_call",
-        id: "call_incomplete",
-        name: "list_files",
-        arguments: { path: "." },
-    });
+    assert.strictEqual(items[1].type, "message");
+    assert.strictEqual(items[1].role, "user");
+    assert.ok(items[1].content.includes('[Milestone: list_files (call_id: "call_incomplete")'));
     assert.deepStrictEqual(items[2], {
-        type: "tool_result",
-        callId: "call_incomplete",
-        content: "Tool execution was interrupted before completion",
-        isError: true,
-    });
-    assert.deepStrictEqual(items[3], {
         type: "message",
         role: "system",
         content: "[Previous assistant generation was interrupted before completion]",
     });
-    assert.deepStrictEqual(items[4], { type: "message", role: "user", content: "new question" });
+    assert.deepStrictEqual(items[3], { type: "message", role: "user", content: "new question" });
 });
 
 test("compileContext: durationMs and internal metadata are never exposed on ModelItem", () => {
@@ -306,41 +288,31 @@ test("compileContext: deterministic ordering across heterogeneous transcript", (
 
     const compiled = compileWithoutPolicy(transcript);
 
-    assert.deepStrictEqual(compiled, [
-        { type: "message", role: "system", content: "System instructions" },
-        { type: "message", role: "user", content: "Inspect repo" },
-        {
-            type: "tool_call",
-            id: "call_1",
-            name: "list_files",
-            arguments: { path: "." },
-        },
-        {
-            type: "tool_result",
-            callId: "call_1",
-            content: "file1.ts\nfile2.ts",
-        },
-        { type: "message", role: "assistant", content: "I see file1.ts and file2.ts." },
-        { type: "message", role: "user", content: "Read file1" },
-        {
-            type: "tool_call",
-            id: "call_2",
-            name: "read_file",
-            arguments: { path: "file1.ts" },
-        },
-        {
-            type: "tool_result",
-            callId: "call_2",
-            content: "Tool execution cancelled",
-            isError: true,
-        },
-        { type: "message", role: "assistant", content: "Cancelled early" },
-        {
-            type: "message",
-            role: "system",
-            content: "[Previous assistant generation was interrupted before completion]",
-        },
-    ]);
+    assert.strictEqual(compiled.length, 8);
+    assert.deepStrictEqual(compiled[0], {
+        type: "message",
+        role: "system",
+        content: "System instructions",
+    });
+    assert.deepStrictEqual(compiled[1], { type: "message", role: "user", content: "Inspect repo" });
+    assert.ok((compiled[2] as any).content.includes('[Milestone: list_files (call_id: "call_1")'));
+    assert.deepStrictEqual(compiled[3], {
+        type: "message",
+        role: "assistant",
+        content: "I see file1.ts and file2.ts.",
+    });
+    assert.deepStrictEqual(compiled[4], { type: "message", role: "user", content: "Read file1" });
+    assert.ok((compiled[5] as any).content.includes('[Milestone: read_file (call_id: "call_2")'));
+    assert.deepStrictEqual(compiled[6], {
+        type: "message",
+        role: "assistant",
+        content: "Cancelled early",
+    });
+    assert.deepStrictEqual(compiled[7], {
+        type: "message",
+        role: "system",
+        content: "[Previous assistant generation was interrupted before completion]",
+    });
 });
 
 test("compileContext: default compileContext prepends AGENT_POLICY once at index 0", () => {
@@ -395,21 +367,20 @@ test("compileContext: preserves deterministic transcript ordering when AGENT_POL
 
     const compiled = compileContext(transcript);
 
-    assert.deepStrictEqual(compiled, [
-        { type: "message", role: "system", content: AGENT_POLICY },
-        { type: "message", role: "system", content: "Custom system prompt" },
-        { type: "message", role: "user", content: "Inspect repo" },
-        {
-            type: "tool_call",
-            id: "call_1",
-            name: "list_files",
-            arguments: { path: "." },
-        },
-        {
-            type: "tool_result",
-            callId: "call_1",
-            content: "file1.ts\nfile2.ts",
-        },
-        { type: "message", role: "assistant", content: "I see file1.ts and file2.ts." },
-    ]);
+    assert.equal(compiled.length, 5);
+    assert.deepStrictEqual(compiled[0], { type: "message", role: "system", content: AGENT_POLICY });
+    assert.deepStrictEqual(compiled[1], {
+        type: "message",
+        role: "system",
+        content: "Custom system prompt",
+    });
+    assert.deepStrictEqual(compiled[2], { type: "message", role: "user", content: "Inspect repo" });
+    assert.equal(compiled[3].type, "message");
+    assert.equal((compiled[3] as any).role, "user");
+    assert.ok((compiled[3] as any).content.includes("[Milestone: list_files"));
+    assert.deepStrictEqual(compiled[4], {
+        type: "message",
+        role: "assistant",
+        content: "I see file1.ts and file2.ts.",
+    });
 });

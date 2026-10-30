@@ -172,23 +172,17 @@ test("tool result is present in second ModelRequest", async () => {
 
     assert.strictEqual(capturedRequests.length, 2);
     const secondReq = capturedRequests[1];
-    assert.strictEqual(secondReq.items.length, 3);
+    assert.strictEqual(secondReq.items.length, 2);
     assert.deepStrictEqual(secondReq.items[0], {
         type: "message",
         role: "user",
         content: "who is u123",
     });
-    assert.deepStrictEqual(secondReq.items[1], {
-        type: "tool_call",
-        id: "call_abc",
-        name: "get_user",
-        arguments: { id: "u123" },
-    });
-    assert.deepStrictEqual(secondReq.items[2], {
-        type: "tool_result",
-        callId: "call_abc",
-        content: JSON.stringify({ name: "Alice" }),
-    });
+    assert.strictEqual(secondReq.items[1].type, "message");
+    assert.strictEqual(secondReq.items[1].role, "user");
+    assert.ok(
+        (secondReq.items[1] as any).content.includes('[Milestone: get_user (call_id: "call_abc")'),
+    );
 });
 
 test("final assistant text streams after tool result", async () => {
@@ -277,30 +271,23 @@ test("text before tool call is preserved", async () => {
         events.push(event);
     }
 
-    // Verify events sequence
+    // Verify events sequence delivers pre-tool text to the consumer
     assert.strictEqual(events.length, 3);
     assert.deepStrictEqual(events[0], { type: "text", content: "Let me check that." });
     assert.strictEqual(events[1].type, "tool_execution");
     assert.deepStrictEqual(events[2], { type: "text", content: "Status is active." });
 
-    // Verify second request items contain the pre-tool assistant message
+    // Verify second request contains user goal and milestone evidence, avoiding redundant assistant narration replay
     const secondReq = capturedRequests[1];
-    assert.deepStrictEqual(secondReq.items[1], {
+    assert.strictEqual(secondReq.items.length, 2);
+    assert.deepStrictEqual(secondReq.items[0], {
         type: "message",
-        role: "assistant",
-        content: "Let me check that.",
+        role: "user",
+        content: "status?",
     });
-    assert.deepStrictEqual(secondReq.items[2], {
-        type: "tool_call",
-        id: "c_lookup",
-        name: "lookup",
-        arguments: { key: "status" },
-    });
-    assert.deepStrictEqual(secondReq.items[3], {
-        type: "tool_result",
-        callId: "c_lookup",
-        content: "active",
-    });
+    assert.ok(
+        (secondReq.items[1] as any).content.includes('[Milestone: lookup (call_id: "c_lookup")'),
+    );
 });
 
 test("multiple tool calls in one model turn execute sequentially", async () => {
@@ -416,14 +403,15 @@ test("tool execution failure becomes isError tool result and model gets another 
     }
     assert.deepStrictEqual(events[1], { type: "text", content: "Recovered from failure" });
 
-    // Verify second request contains isError tool_result
+    // Verify second request contains failed milestone evidence
     const secondReq = capturedRequests[1];
-    assert.deepStrictEqual(secondReq.items[2], {
-        type: "tool_result",
-        callId: "c_fail",
-        content: "Disk read failed",
-        isError: true,
-    });
+    assert.strictEqual(secondReq.items.length, 2);
+    assert.ok(
+        (secondReq.items[1] as any).content.includes(
+            '[Milestone: flaky_tool (call_id: "c_fail") - Execution: failed',
+        ),
+    );
+    assert.ok((secondReq.items[1] as any).content.includes("Disk read failed"));
 });
 
 test("unknown/hallucinated tool becomes recoverable failed tool result", async () => {

@@ -636,8 +636,6 @@ test("sessionPersistence: compacting tool-result for model does not mutate canon
 
     const compactor = {
         compactHistory: async () => null,
-        compactToolResult: async ({ toolName, callId, targetTokens }: any) =>
-            `[Summary of ${toolName} (${callId})]: Compacted payload within ${targetTokens} tokens.\n\n[Canonical transcript retains full original output]`,
     };
 
     const runtime = createAkkcoRuntime(
@@ -669,16 +667,17 @@ test("sessionPersistence: compacting tool-result for model does not mutate canon
 
     assert.equal(capturedRequests.length, 2);
 
-    // Check request 2 received by provider: tool_result content MUST be compacted
-    const req2ToolResult = capturedRequests[1].items.find((it) => it.type === "tool_result") as any;
-    assert.ok(req2ToolResult, "Must have tool_result item in model request");
+    // Check request 2 received by provider: model receives milestone evidence, not raw tool result
+    const req2Milestone = capturedRequests[1].items.find(
+        (it) =>
+            it.type === "message" &&
+            it.role === "user" &&
+            it.content.includes("[Milestone: fetch_data"),
+    ) as any;
+    assert.ok(req2Milestone, "Must have milestone evidence item in model request");
     assert.ok(
-        req2ToolResult.content.length < largeToolResult.length,
-        "Model request projection must have compacted tool result",
-    );
-    assert.ok(
-        req2ToolResult.content.includes("[Summary of fetch_data"),
-        "Must contain summary in model projection",
+        req2Milestone.content.length < largeToolResult.length,
+        "Model request projection must have bounded milestone representation",
     );
 
     // But canonical session transcript MUST retain the FULL untruncated result:

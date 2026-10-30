@@ -423,7 +423,6 @@ test("Session restoration: Context Compiler and Compactor are correctly bound to
                 },
             };
         },
-        compactToolResult: async () => null,
     };
 
     const targetSessionId = "resumed-session-target";

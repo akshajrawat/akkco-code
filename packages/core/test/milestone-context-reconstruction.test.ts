@@ -64,7 +64,6 @@ test("Context reconstruction: The original user goal remains unchanged across mu
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     for await (const _ of runtime.run({
@@ -134,7 +133,6 @@ test("Context reconstruction: Completed milestones appear individually in subseq
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     for await (const _ of runtime.run({
@@ -205,7 +203,6 @@ test("Context reconstruction: Redundant assistant narration and historical raw o
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     for await (const _ of runtime.run({
@@ -261,7 +258,6 @@ test("Context reconstruction: Respects token budget and fails closed when contex
     const runtime = createAkkcoRuntime(provider, {
         profile,
         budget,
-        milestones: true,
     });
 
     // Send a user prompt that alone exceeds the 70 available tokens

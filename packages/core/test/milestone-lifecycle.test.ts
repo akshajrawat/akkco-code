@@ -51,7 +51,6 @@ test("Milestone lifecycle: One completed tool execution creates one completed mi
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const events: RuntimeEvent[] = [];
@@ -135,7 +134,6 @@ test("Milestone lifecycle: Multiple sequential tool calls produce separate miles
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const milestones: ToolMilestone[] = [];
@@ -201,7 +199,6 @@ test("Milestone lifecycle: Multiple calls in one response preserve independent r
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const milestones: ToolMilestone[] = [];
@@ -247,7 +244,6 @@ test("Milestone lifecycle: Failed and cancelled calls are not represented as suc
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const toolEvents: RuntimeEvent[] = [];

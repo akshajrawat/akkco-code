@@ -25,7 +25,7 @@ export interface CliControllerOptions {
     budget?: ContextBudget;
     store?: ConversationStore;
     metadata?: CliMetadata;
-    milestones?: boolean;
+    summarizerProvider?: ModelProvider;
 }
 
 export type NoticeKind = "info" | "error" | "warning";

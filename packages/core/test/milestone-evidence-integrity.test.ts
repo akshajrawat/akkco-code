@@ -46,7 +46,6 @@ test("Evidence integrity: Raw tool output remains recoverable via recoverMilesto
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const session = createAkkcoSession(runtime);

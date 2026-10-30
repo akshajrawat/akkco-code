@@ -768,19 +768,16 @@ test("Runtime integration preserves assistant pre-tool text before tool executio
     }
     assert.deepStrictEqual(events[2], { type: "text", content: "File contains foo details." });
 
-    // Verify that the second request sent to the provider preserved the assistant pre-tool text
+    // Verify that the second request sent to the provider uses completed milestone evidence
     assert.strictEqual(capturedRequests.length, 2);
     const secondReq = capturedRequests[1];
-    // In compatibility mode, items[0] is system tool instructions.
-    // items[1] is the user request.
-    // items[2] is the assistant message containing the pre-tool prose and tool envelope.
-    const assistantMsg = secondReq.items.find(
-        (it): it is ModelMessage => it.type === "message" && it.role === "assistant",
+    const milestoneMsg = secondReq.items.find(
+        (it) =>
+            it.type === "message" &&
+            it.role === "user" &&
+            (it as any).content?.includes("[Milestone: read_file"),
     );
-    assert.ok(assistantMsg);
-    assert.match(assistantMsg.content, /^I will inspect the file\.\n\n<akkco_tool_call>/);
-    assert.match(assistantMsg.content, /"name":"read_file"/);
-    assert.match(assistantMsg.content, /<\/akkco_tool_call>$/);
+    assert.ok(milestoneMsg, "Second request must contain milestone evidence");
 });
 
 test("F-019: CLI in test mode uses in-memory database and never creates ~/.akkco/akkco.db", async () => {

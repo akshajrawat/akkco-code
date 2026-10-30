@@ -108,7 +108,6 @@ test("Realistic Integration: 'Explain what TextToolCompatibilityProvider does, w
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const session = createAkkcoSession(runtime);

@@ -59,7 +59,6 @@ test("Compaction UI: historical compaction starts, updates status, succeeds, and
             progressCallback?.({ type: "success", scope: "history" });
             return summary;
         },
-        compactToolResult: async () => null,
         onProgress: (listener) => {
             progressCallback = (event) => {
                 events.push(event);
@@ -134,106 +133,6 @@ test("Compaction UI: historical compaction starts, updates status, succeeds, and
     await controller.dispose();
 });
 
-test("Compaction UI: tool-result compaction starts, updates status, and clears status", async () => {
-    const events: CompactionProgressEvent[] = [];
-    let progressCallback: ((event: CompactionProgressEvent) => void) | undefined;
-
-    const mockCompactor: ContextCompactor = {
-        compactHistory: async () => null,
-        compactToolResult: async (options) => {
-            progressCallback?.({ type: "start", scope: "tool", toolName: options.toolName });
-            const result = `[Summary of ${options.toolName} (${options.callId})]: Compacted data.\n\n[Canonical transcript retains full original output]`;
-            progressCallback?.({ type: "success", scope: "tool", toolName: options.toolName });
-            return result;
-        },
-        onProgress: (listener) => {
-            progressCallback = (event) => {
-                events.push(event);
-                listener(event);
-            };
-            return () => {};
-        },
-    };
-
-    let step = 0;
-    const provider: ModelProvider = {
-        id: "mock-tool-provider",
-        stream: () => ({
-            async *[Symbol.asyncIterator]() {
-                step++;
-                if (step === 1) {
-                    yield {
-                        type: "tool_call",
-                        id: "call_tool_1",
-                        name: "read_file",
-                        arguments: { path: "large.txt" },
-                    } satisfies ModelEvent;
-                } else {
-                    yield {
-                        type: "text",
-                        content: "Final answer after tool result.",
-                    } satisfies ModelEvent;
-                }
-            },
-        }),
-    };
-
-    const toolRegistry = createToolRegistry();
-    toolRegistry.register({
-        name: "read_file",
-        description: "reads file",
-        inputSchema: z.object({ path: z.string() }),
-        execute: async () => ({ content: "VERY_LARGE_TOOL_OUTPUT_".repeat(100) }),
-    });
-
-    const profile: ModelProfile = {
-        id: "test-tool-profile",
-        contextWindowTokens: 500,
-        maxOutputTokens: 100,
-        safetyMarginTokens: 50,
-        toolMode: "native",
-        charsPerToken: 4,
-    };
-    const budget = deriveContextBudget(profile);
-
-    const controller = createCliController({
-        provider,
-        toolRegistry,
-        compactor: mockCompactor,
-        profile,
-        budget,
-    });
-
-    const observedStatuses: string[] = [];
-    controller.subscribe(() => {
-        observedStatuses.push(uiStatus(controller.getSnapshot()));
-    });
-
-    await controller.submit("Read large file please");
-
-    assert.ok(
-        events.some(
-            (e) => e.type === "start" && e.scope === "tool" && (e as any).toolName === "read_file",
-        ),
-    );
-    assert.ok(events.some((e) => e.type === "success" && e.scope === "tool"));
-    assert.ok(observedStatuses.includes("Compacting read_file output..."));
-
-    // Completed notice and cleared status
-    const notices = controller.getSnapshot().history.filter((h) => h.type === "notice");
-    assert.ok(
-        notices.some(
-            (n) => n.type === "notice" && n.content.includes("Context compacted. Continuing..."),
-        ),
-    );
-
-    const finalSnapshot = controller.getSnapshot();
-    assert.equal(finalSnapshot.compaction, undefined);
-    assert.equal(uiStatus(finalSnapshot), "Idle");
-
-    await controller.dispose();
-});
-
 test("Compaction UI: operational compactor failure displays fallback notice and clears status", async () => {
     let progressCallback: ((event: CompactionProgressEvent) => void) | undefined;
 
@@ -244,7 +143,6 @@ test("Compaction UI: operational compactor failure displays fallback notice and 
             progressCallback?.({ type: "fallback", scope: "history" });
             return null; // safe context fallback
         },
-        compactToolResult: async () => null,
         onProgress: (listener) => {
             progressCallback = listener;
             return () => {};
@@ -322,7 +220,6 @@ test("Compaction UI: aborted compaction emits cancel, clears status, and NEVER r
             const err = new DOMException("The operation was aborted.", "AbortError");
             throw err;
         },
-        compactToolResult: async () => null,
         onProgress: (listener) => {
             progressCallback = (e) => {
                 events.push(e);
@@ -465,7 +362,6 @@ test("Compaction UI: existing generation streaming remains uninterrupted and rep
     let compactionCallCount = 0;
     const mockCompactor: ContextCompactor = {
         compactHistory: async () => null,
-        compactToolResult: async () => null,
         onProgress: (listener) => {
             // Simulate start and complete for two separate turns
             listener({ type: "start", scope: "history" });

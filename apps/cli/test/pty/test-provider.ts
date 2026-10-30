@@ -17,7 +17,8 @@ export class DeterministicTestProvider implements ModelProvider {
                 (item): item is ModelMessage =>
                     item.type === "message" &&
                     item.role === "user" &&
-                    !item.content.startsWith("<akkco_tool_result"),
+                    !item.content.startsWith("<akkco_tool_result") &&
+                    !item.content.startsWith("[Milestone:"),
             )
             .at(-1);
 
@@ -27,7 +28,8 @@ export class DeterministicTestProvider implements ModelProvider {
                 item.type === "tool_result" ||
                 (item.type === "message" &&
                     item.role === "user" &&
-                    item.content.startsWith("<akkco_tool_result")),
+                    (item.content.startsWith("<akkco_tool_result") ||
+                        item.content.startsWith("[Milestone:"))),
         );
 
         return {

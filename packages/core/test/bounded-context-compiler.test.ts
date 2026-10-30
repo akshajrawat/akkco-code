@@ -222,17 +222,17 @@ test("BoundedContextCompiler 9 & 10: tool calls/results are never structurally o
     const compiler = createBoundedContextCompiler();
     const compiled = await compiler.compile({ transcript });
 
-    // Verify tool_call followed by tool_result
-    const toolCallIdx = compiled.findIndex((i) => i.type === "tool_call" && i.id === "call_abc");
-    const toolResultIdx = compiled.findIndex(
-        (i) => i.type === "tool_result" && i.callId === "call_abc",
+    // Under milestone architecture, tool execution is compiled into an evidence-backed milestone item
+    const milestoneIdx = compiled.findIndex(
+        (i) =>
+            i.type === "message" &&
+            (i as any).role === "user" &&
+            (i as any).content.includes('[Milestone: read_file (call_id: "call_abc")'),
     );
 
-    assert.ok(toolCallIdx >= 0);
-    assert.ok(toolResultIdx >= 0);
-    assert.equal(toolResultIdx, toolCallIdx + 1);
+    assert.ok(milestoneIdx >= 0);
 
-    // Chronological order: user -> tool_call -> tool_result -> assistant -> current user
+    // Chronological order: user -> milestone -> assistant -> current user
     assert.equal(compiled.at(-1)?.type, "message");
     assert.equal((compiled.at(-1) as any).role, "user");
     assert.equal((compiled.at(-1) as any).content, "What is the name?");
@@ -1260,8 +1260,6 @@ test("Regression 12: Multi-iteration tool loop via AkkcoRuntime continuously bou
 
     const compactor = {
         compactHistory: async () => null,
-        compactToolResult: async ({ toolName, callId, targetTokens }: any) =>
-            `[Summary of ${toolName} (${callId})]: Compacted to ${targetTokens} tokens.`,
     };
 
     const runtime = createAkkcoRuntime(

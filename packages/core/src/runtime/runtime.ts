@@ -1,22 +1,15 @@
 import type {
     ModelItem,
-    ModelMessage,
     ModelProfile,
     ModelProvider,
     ModelRequest,
-    ModelToolCall,
     ModelToolCallEvent,
-    ModelToolResult,
 } from "@akkco/models";
 import { ensureBoundedProvider } from "../context/bounded-model-provider.js";
 import type { ContextBudget } from "../context/budget.js";
 import type { ContextCompactor } from "../context/context-compactor.js";
 import { reconstructContextWithMilestones } from "../context/milestone-context.js";
-import {
-    calculateAvailableToolTokens,
-    ContextBudgetOverflowError,
-    prepareBoundedModelRequest,
-} from "../context/request-preparer.js";
+import { prepareBoundedModelRequest } from "../context/request-preparer.js";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
 import { createMilestoneProcessor, type MilestoneProcessor } from "./milestones/processor.js";
 import type { ToolMilestone } from "./milestones/types.js";
@@ -48,12 +41,14 @@ export interface AkkcoRuntimeOptions {
     readonly maxToolOutputTokens?: number;
     readonly profile?: ModelProfile;
     readonly milestoneProcessor?: MilestoneProcessor;
-    readonly milestones?: boolean;
+    readonly summarizerProvider?: ModelProvider;
 }
 
 /**
- * Core agent runtime coordinating the multi-turn model-tool execution loop
- * while enforcing reliability controls, milestone compaction, and cycle detection.
+ * Core agent runtime coordinating the multi-turn model-tool execution loop.
+ * Milestone-based context reconstruction is the authoritative model-facing mechanism:
+ * every completed tool execution is represented as an evidence-backed milestone rather than
+ * endlessly replaying raw outputs and assistant narration into subsequent model requests.
  */
 export const createAkkcoRuntime = (
     provider: ModelProvider,
@@ -73,7 +68,7 @@ export const createAkkcoRuntime = (
             "maxToolOutputTokens" in toolHostOrOptions ||
             "profile" in toolHostOrOptions ||
             "milestoneProcessor" in toolHostOrOptions ||
-            "milestones" in toolHostOrOptions);
+            "summarizerProvider" in toolHostOrOptions);
 
     const options: AkkcoRuntimeOptions = isOptionsObject
         ? (toolHostOrOptions as AkkcoRuntimeOptions)
@@ -87,12 +82,8 @@ export const createAkkcoRuntime = (
 
     const toolHost = options.toolHost;
     const effectiveBudget = options.budget;
-    const effectiveCompactor = options.compactor;
     const effectiveMaxToolOutputTokens = options.maxToolOutputTokens;
     const effectiveProfile = options.profile;
-    const useMilestoneContextReconstruction = Boolean(
-        options.milestones || options.milestoneProcessor,
-    );
 
     const effectiveProvider = ensureBoundedProvider(provider, {
         profile: effectiveProfile,
@@ -103,7 +94,7 @@ export const createAkkcoRuntime = (
     const effectiveMilestoneProcessor =
         options.milestoneProcessor ??
         createMilestoneProcessor({
-            provider: (options.compactor as any)?.provider,
+            provider: options.summarizerProvider,
             profile: effectiveProfile,
             budget: effectiveBudget,
             maxMilestoneTokens: effectiveMaxToolOutputTokens,
@@ -117,7 +108,6 @@ export const createAkkcoRuntime = (
             async *[Symbol.asyncIterator](): AsyncGenerator<RuntimeEvent, void, unknown> {
                 const resolvedProfile = request.profile ?? effectiveProfile;
                 const initialBaseItems: ModelItem[] = request.items.map((item) => ({ ...item }));
-                const workingItems: ModelItem[] = request.items.map((item) => ({ ...item }));
                 const completedMilestones: ToolMilestone[] = [];
 
                 // Identify the root user goal from the initial request
@@ -148,16 +138,15 @@ export const createAkkcoRuntime = (
                 while (true) {
                     throwIfAborted(request.signal);
 
-                    // Reconstruct model-visible context:
-                    // If milestone architecture is enabled and milestones exist, use initial goal + completed milestones.
-                    // Otherwise, fall back to workingItems.
+                    // Reconstruct model-visible context exclusively from initial base items
+                    // (policy, memory context, and user prompt) plus completed milestones.
                     const effectiveItems: ModelItem[] =
-                        useMilestoneContextReconstruction && completedMilestones.length > 0
+                        completedMilestones.length > 0
                             ? reconstructContextWithMilestones(
                                   initialBaseItems,
                                   completedMilestones,
                               )
-                            : workingItems;
+                            : initialBaseItems;
 
                     const effectiveRequest: ModelRequest = {
                         items: effectiveItems,
@@ -166,8 +155,8 @@ export const createAkkcoRuntime = (
                         profile: resolvedProfile,
                     };
 
-                    // Enforce token budget bounds before invoking the provider when reconstructing context
-                    if (effectiveBudget && useMilestoneContextReconstruction) {
+                    // Enforce token budget bounds before invoking the provider
+                    if (effectiveBudget) {
                         prepareBoundedModelRequest({
                             request: effectiveRequest,
                             budget: effectiveBudget,
@@ -207,25 +196,6 @@ export const createAkkcoRuntime = (
                         );
                     }
 
-                    if (turnAssistantText.length > 0) {
-                        const assistantMessage: ModelMessage = {
-                            type: "message",
-                            role: "assistant",
-                            content: turnAssistantText,
-                        };
-                        workingItems.push(assistantMessage);
-                    }
-
-                    for (const call of toolCallEvents) {
-                        const toolCallItem: ModelToolCall = {
-                            type: "tool_call",
-                            id: call.id,
-                            name: call.name,
-                            arguments: call.arguments,
-                        };
-                        workingItems.push(toolCallItem);
-                    }
-
                     for (const call of toolCallEvents) {
                         throwIfAborted(request.signal);
 
@@ -257,16 +227,9 @@ export const createAkkcoRuntime = (
                                         error: warningMessage,
                                         durationMs: 0,
                                         signal: request.signal,
+                                        profile: resolvedProfile,
                                     });
                                 completedMilestones.push(milestone);
-
-                                const resultItem: ModelToolResult = {
-                                    type: "tool_result",
-                                    callId: call.id,
-                                    content: warningMessage,
-                                    isError: true,
-                                };
-                                workingItems.push(resultItem);
 
                                 yield {
                                     type: "tool_execution",
@@ -322,16 +285,9 @@ export const createAkkcoRuntime = (
                                     error: warningMessage,
                                     durationMs: 0,
                                     signal: request.signal,
+                                    profile: resolvedProfile,
                                 });
                             completedMilestones.push(milestone);
-
-                            const resultItem: ModelToolResult = {
-                                type: "tool_result",
-                                callId: call.id,
-                                content: warningMessage,
-                                isError: true,
-                            };
-                            workingItems.push(resultItem);
 
                             yield {
                                 type: "tool_execution",
@@ -371,16 +327,9 @@ export const createAkkcoRuntime = (
                                     error: errorMsg,
                                     durationMs: 0,
                                     signal: request.signal,
+                                    profile: resolvedProfile,
                                 });
                             completedMilestones.push(milestone);
-
-                            const resultItem: ModelToolResult = {
-                                type: "tool_result",
-                                callId: call.id,
-                                content: errorMsg,
-                                isError: true,
-                            };
-                            workingItems.push(resultItem);
 
                             yield {
                                 type: "tool_execution",
@@ -389,6 +338,7 @@ export const createAkkcoRuntime = (
                                 arguments: call.arguments,
                                 error: errorMsg,
                                 status: "failed",
+                                durationMs: 0,
                                 milestone,
                             } satisfies RuntimeToolExecutionEvent;
 
@@ -402,120 +352,26 @@ export const createAkkcoRuntime = (
                             continue;
                         }
 
+                        // Execute the tool and capture original uncompacted output
+                        let rawResult: string | undefined;
+                        let executionError: string | undefined;
+                        let executionDurationMs = 0;
                         const startTime = Date.now();
+
                         try {
                             const result = await toolHost.execute(call.name, call.arguments);
-                            const durationMs = Date.now() - startTime;
-
+                            executionDurationMs = Date.now() - startTime;
+                            rawResult = result.content;
                             consecutiveToolErrors = 0;
-
-                            const milestone =
-                                await effectiveMilestoneProcessor.processToolExecution({
-                                    parentGoal: parentGoalText,
-                                    parentGoalId,
-                                    callId: call.id,
-                                    toolName: call.name,
-                                    arguments: call.arguments,
-                                    rawResult: result.content,
-                                    executionStatus: "completed",
-                                    durationMs,
-                                    signal: request.signal,
-                                });
-                            completedMilestones.push(milestone);
-
-                            let toolContentForWorkingItems = result.content;
-                            if (effectiveCompactor && !useMilestoneContextReconstruction) {
-                                let fitsWithoutCompaction = false;
-                                try {
-                                    prepareBoundedModelRequest({
-                                        request: {
-                                            items: [
-                                                ...workingItems,
-                                                {
-                                                    type: "tool_result",
-                                                    callId: call.id,
-                                                    content: result.content,
-                                                },
-                                            ],
-                                            tools: toolHost?.tools,
-                                            signal: request.signal,
-                                            profile: resolvedProfile,
-                                        },
-                                        budget: effectiveBudget,
-                                        profile: resolvedProfile,
-                                        maxToolOutputTokens: effectiveMaxToolOutputTokens,
-                                    });
-                                    fitsWithoutCompaction = true;
-                                } catch (overflowErr) {
-                                    if (overflowErr instanceof ContextBudgetOverflowError) {
-                                        fitsWithoutCompaction = false;
-                                    } else {
-                                        throw overflowErr;
-                                    }
-                                }
-
-                                if (!fitsWithoutCompaction) {
-                                    const targetToolBudget = calculateAvailableToolTokens({
-                                        items: workingItems,
-                                        tools: toolHost?.tools,
-                                        profile: resolvedProfile,
-                                        budget: effectiveBudget,
-                                        maxToolOutputTokens: effectiveMaxToolOutputTokens,
-                                    });
-
-                                    if (targetToolBudget > 0) {
-                                        try {
-                                            const compacted =
-                                                await effectiveCompactor.compactToolResult({
-                                                    toolName: call.name,
-                                                    callId: call.id,
-                                                    content: result.content,
-                                                    targetTokens: targetToolBudget,
-                                                    signal: request.signal,
-                                                });
-                                            if (compacted) {
-                                                toolContentForWorkingItems = compacted;
-                                            }
-                                        } catch (compactionErr) {
-                                            if (
-                                                request.signal?.aborted ||
-                                                (compactionErr instanceof Error &&
-                                                    compactionErr.name === "AbortError")
-                                            ) {
-                                                throw compactionErr;
-                                            }
-                                            // On compaction error, retain original content and allow downstream preflight to fail closed
-                                        }
-                                    }
-                                }
-                            }
-
-                            const resultItem: ModelToolResult = {
-                                type: "tool_result",
-                                callId: call.id,
-                                content: toolContentForWorkingItems,
-                            };
-                            workingItems.push(resultItem);
-
-                            yield {
-                                type: "tool_execution",
-                                callId: call.id,
-                                toolName: call.name,
-                                arguments: call.arguments,
-                                result: result.content,
-                                status: "completed",
-                                durationMs,
-                                milestone,
-                            } satisfies RuntimeToolExecutionEvent;
                         } catch (error) {
                             throwIfAborted(request.signal);
-
                             consecutiveToolErrors++;
+                            executionDurationMs = Date.now() - startTime;
+                            executionError = error instanceof Error ? error.message : String(error);
+                        }
 
-                            const durationMs = Date.now() - startTime;
-                            const errorMessage =
-                                error instanceof Error ? error.message : String(error);
-
+                        if (executionError !== undefined) {
+                            // Tool execution failed
                             const milestone =
                                 await effectiveMilestoneProcessor.processToolExecution({
                                     parentGoal: parentGoalText,
@@ -524,28 +380,21 @@ export const createAkkcoRuntime = (
                                     toolName: call.name,
                                     arguments: call.arguments,
                                     executionStatus: "failed",
-                                    error: errorMessage,
-                                    durationMs,
+                                    error: executionError,
+                                    durationMs: executionDurationMs,
                                     signal: request.signal,
+                                    profile: resolvedProfile,
                                 });
                             completedMilestones.push(milestone);
-
-                            const resultItem: ModelToolResult = {
-                                type: "tool_result",
-                                callId: call.id,
-                                content: errorMessage,
-                                isError: true,
-                            };
-                            workingItems.push(resultItem);
 
                             yield {
                                 type: "tool_execution",
                                 callId: call.id,
                                 toolName: call.name,
                                 arguments: call.arguments,
-                                error: errorMessage,
+                                error: executionError,
                                 status: "failed",
-                                durationMs,
+                                durationMs: executionDurationMs,
                                 milestone,
                             } satisfies RuntimeToolExecutionEvent;
 
@@ -556,6 +405,64 @@ export const createAkkcoRuntime = (
                                     `Agent loop terminated: reached consecutive tool error limit of ${consecutiveToolErrorLimit}.`,
                                 );
                             }
+                        } else {
+                            // Tool execution succeeded.
+                            // Process completed milestone. If milestone processing fails,
+                            // the tool execution itself remains marked as completed.
+                            let milestone: ToolMilestone;
+                            try {
+                                milestone = await effectiveMilestoneProcessor.processToolExecution({
+                                    parentGoal: parentGoalText,
+                                    parentGoalId,
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    rawResult,
+                                    executionStatus: "completed",
+                                    durationMs: executionDurationMs,
+                                    signal: request.signal,
+                                    profile: resolvedProfile,
+                                });
+                            } catch (milestoneErr) {
+                                throwIfAborted(request.signal);
+                                const mErrorMsg =
+                                    milestoneErr instanceof Error
+                                        ? milestoneErr.message
+                                        : String(milestoneErr);
+
+                                milestone = {
+                                    id: `milestone-${call.id}`,
+                                    parentGoalId,
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    executionStatus: "completed", // Tool succeeded!
+                                    processingStatus: "failed", // Milestone processing failed!
+                                    error: mErrorMsg,
+                                    durationMs: executionDurationMs,
+                                    summary: `Tool execution succeeded, but milestone processing failed: ${mErrorMsg}`,
+                                    findings: [],
+                                    unresolvedQuestions: [
+                                        "Milestone processing failed; raw evidence preserved in transcript.",
+                                    ],
+                                    omissions:
+                                        "Tool output processing failed; full raw output preserved in transcript.",
+                                    evidenceRefs: [`call:${call.id}`],
+                                    estimatedTokens: 50,
+                                };
+                            }
+                            completedMilestones.push(milestone);
+
+                            yield {
+                                type: "tool_execution",
+                                callId: call.id,
+                                toolName: call.name,
+                                arguments: call.arguments,
+                                result: rawResult,
+                                status: "completed",
+                                durationMs: executionDurationMs,
+                                milestone,
+                            } satisfies RuntimeToolExecutionEvent;
                         }
                     }
 

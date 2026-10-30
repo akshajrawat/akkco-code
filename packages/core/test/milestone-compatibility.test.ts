@@ -43,7 +43,6 @@ test("Compatibility: Native tool calling remains functional and correctly pairs 
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     const session = createAkkcoSession(runtime);
@@ -108,7 +107,6 @@ test("Compatibility: Textual compatibility calling with TextToolCompatibilityPro
 
     const runtime = createAkkcoRuntime(compatProvider, {
         toolHost,
-        milestones: true,
     });
 
     const events: RuntimeEvent[] = [];
@@ -160,7 +158,6 @@ test("Compatibility: Cancellation (AbortSignal) is respected cleanly during tool
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
     });
 
     await assert.rejects(
@@ -198,7 +195,6 @@ test("Compatibility: Existing loop-reliability safeguards still work and generat
 
     const runtime = createAkkcoRuntime(provider, {
         toolHost,
-        milestones: true,
         reliabilityOptions: {
             repeatedToolCallLimit: 2,
         },
