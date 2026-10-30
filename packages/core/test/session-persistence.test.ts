@@ -672,7 +672,8 @@ test("sessionPersistence: compacting tool-result for model does not mutate canon
         (it) =>
             it.type === "message" &&
             it.role === "user" &&
-            it.content.includes("[Milestone: fetch_data"),
+            it.content.includes("fetch_data") &&
+            it.content.includes("Did:"),
     ) as any;
     assert.ok(req2Milestone, "Must have milestone evidence item in model request");
     assert.ok(

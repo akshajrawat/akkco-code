@@ -112,7 +112,7 @@ test("compileContext: completed tool execution emits milestone ModelItem", () =>
     assert.strictEqual(items[0].type, "message");
     assert.strictEqual(items[0].role, "user");
     assert.strictEqual((items[0] as any).isPolicy, false);
-    assert.ok(items[0].content.includes('[Milestone: read_file (call_id: "call_1")'));
+    assert.ok(items[0].content.includes("read_file") && items[0].content.includes("Did:"));
 });
 
 test("compileContext: tool execution with explicit milestone preserves complete milestone evidence", () => {
@@ -145,9 +145,8 @@ test("compileContext: tool execution with explicit milestone preserves complete 
     assert.strictEqual(items.length, 1);
     assert.strictEqual(items[0].type, "message");
     assert.strictEqual(items[0].role, "user");
-    assert.ok(items[0].content.includes('[Milestone: search_text (call_id: "call_m1")'));
-    assert.ok(items[0].content.includes("Found export declaration"));
-    assert.ok(items[0].content.includes("index.ts:1"));
+    assert.ok(items[0].content.includes("search_text") && items[0].content.includes("Did:"));
+    assert.ok(items[0].content.includes("Exported symbol a in index.ts:1"));
 });
 
 test("compileContext: failed tool execution emits milestone ModelItem with failure summary", () => {
@@ -166,9 +165,7 @@ test("compileContext: failed tool execution emits milestone ModelItem with failu
     assert.strictEqual(items.length, 1);
     assert.strictEqual(items[0].type, "message");
     assert.strictEqual(items[0].role, "user");
-    assert.ok(
-        items[0].content.includes('[Milestone: read_file (call_id: "call_2") - Execution: failed'),
-    );
+    assert.ok(items[0].content.includes("read_file") && items[0].content.includes("Did:"));
     assert.ok(items[0].content.includes("File not found: missing.txt"));
 });
 
@@ -186,11 +183,7 @@ test("compileContext: cancelled tool execution emits milestone ModelItem with ca
     assert.strictEqual(items.length, 1);
     assert.strictEqual(items[0].type, "message");
     assert.strictEqual(items[0].role, "user");
-    assert.ok(
-        items[0].content.includes(
-            '[Milestone: search_text (call_id: "call_3") - Execution: cancelled',
-        ),
-    );
+    assert.ok(items[0].content.includes("search_text") && items[0].content.includes("Cancelled"));
 });
 
 test("compileContext: requested and running tool execution compiles to milestone items", () => {
@@ -211,8 +204,14 @@ test("compileContext: requested and running tool execution compiles to milestone
 
     const items = compileWithoutPolicy([requestedItem, runningItem]);
     assert.strictEqual(items.length, 2);
-    assert.ok((items[0] as any).content.includes('[Milestone: list_files (call_id: "call_4")'));
-    assert.ok((items[1] as any).content.includes('[Milestone: list_files (call_id: "call_5")'));
+    assert.ok(
+        (items[0] as any).content.includes("list_files") &&
+            (items[0] as any).content.includes("Did:"),
+    );
+    assert.ok(
+        (items[1] as any).content.includes("list_files") &&
+            (items[1] as any).content.includes("Did:"),
+    );
 });
 
 test("compileContext F-017: incomplete tool record followed by interruption and new user message preserves valid sequencing", () => {
@@ -236,7 +235,7 @@ test("compileContext F-017: incomplete tool record followed by interruption and 
     assert.deepStrictEqual(items[0], { type: "message", role: "user", content: "list files" });
     assert.strictEqual(items[1].type, "message");
     assert.strictEqual(items[1].role, "user");
-    assert.ok(items[1].content.includes('[Milestone: list_files (call_id: "call_incomplete")'));
+    assert.ok(items[1].content.includes("list_files") && items[1].content.includes("Did:"));
     assert.deepStrictEqual(items[2], {
         type: "message",
         role: "system",
@@ -295,14 +294,20 @@ test("compileContext: deterministic ordering across heterogeneous transcript", (
         content: "System instructions",
     });
     assert.deepStrictEqual(compiled[1], { type: "message", role: "user", content: "Inspect repo" });
-    assert.ok((compiled[2] as any).content.includes('[Milestone: list_files (call_id: "call_1")'));
+    assert.ok(
+        (compiled[2] as any).content.includes("list_files") &&
+            (compiled[2] as any).content.includes("Did:"),
+    );
     assert.deepStrictEqual(compiled[3], {
         type: "message",
         role: "assistant",
         content: "I see file1.ts and file2.ts.",
     });
     assert.deepStrictEqual(compiled[4], { type: "message", role: "user", content: "Read file1" });
-    assert.ok((compiled[5] as any).content.includes('[Milestone: read_file (call_id: "call_2")'));
+    assert.ok(
+        (compiled[5] as any).content.includes("read_file") &&
+            (compiled[5] as any).content.includes("Cancelled"),
+    );
     assert.deepStrictEqual(compiled[6], {
         type: "message",
         role: "assistant",
@@ -377,7 +382,10 @@ test("compileContext: preserves deterministic transcript ordering when AGENT_POL
     assert.deepStrictEqual(compiled[2], { type: "message", role: "user", content: "Inspect repo" });
     assert.equal(compiled[3].type, "message");
     assert.equal((compiled[3] as any).role, "user");
-    assert.ok((compiled[3] as any).content.includes("[Milestone: list_files"));
+    assert.ok(
+        (compiled[3] as any).content.includes("list_files") &&
+            (compiled[3] as any).content.includes("Did:"),
+    );
     assert.deepStrictEqual(compiled[4], {
         type: "message",
         role: "assistant",

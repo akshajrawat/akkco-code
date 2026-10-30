@@ -8,7 +8,10 @@ import type {
 import { ensureBoundedProvider } from "../context/bounded-model-provider.js";
 import type { ContextBudget } from "../context/budget.js";
 import type { ContextCompactor } from "../context/context-compactor.js";
-import { reconstructContextWithMilestones } from "../context/milestone-context.js";
+import {
+    deriveDeterministicDid,
+    reconstructContextWithMilestones,
+} from "../context/milestone-context.js";
 import { prepareBoundedModelRequest } from "../context/request-preparer.js";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
 import { createMilestoneProcessor, type MilestoneProcessor } from "./milestones/processor.js";
@@ -228,6 +231,7 @@ export const createAkkcoRuntime = (
                                         durationMs: 0,
                                         signal: request.signal,
                                         profile: resolvedProfile,
+                                        index: completedMilestones.length + 1,
                                     });
                                 completedMilestones.push(milestone);
 
@@ -286,6 +290,7 @@ export const createAkkcoRuntime = (
                                     durationMs: 0,
                                     signal: request.signal,
                                     profile: resolvedProfile,
+                                    index: completedMilestones.length + 1,
                                 });
                             completedMilestones.push(milestone);
 
@@ -328,6 +333,7 @@ export const createAkkcoRuntime = (
                                     durationMs: 0,
                                     signal: request.signal,
                                     profile: resolvedProfile,
+                                    index: completedMilestones.length + 1,
                                 });
                             completedMilestones.push(milestone);
 
@@ -384,6 +390,7 @@ export const createAkkcoRuntime = (
                                     durationMs: executionDurationMs,
                                     signal: request.signal,
                                     profile: resolvedProfile,
+                                    index: completedMilestones.length + 1,
                                 });
                             completedMilestones.push(milestone);
 
@@ -422,6 +429,7 @@ export const createAkkcoRuntime = (
                                     durationMs: executionDurationMs,
                                     signal: request.signal,
                                     profile: resolvedProfile,
+                                    index: completedMilestones.length + 1,
                                 });
                             } catch (milestoneErr) {
                                 throwIfAborted(request.signal);
@@ -430,6 +438,7 @@ export const createAkkcoRuntime = (
                                         ? milestoneErr.message
                                         : String(milestoneErr);
 
+                                const mIndex = completedMilestones.length + 1;
                                 milestone = {
                                     id: `milestone-${call.id}`,
                                     parentGoalId,
@@ -440,6 +449,13 @@ export const createAkkcoRuntime = (
                                     processingStatus: "failed", // Milestone processing failed!
                                     error: mErrorMsg,
                                     durationMs: executionDurationMs,
+                                    did: deriveDeterministicDid(
+                                        call.name,
+                                        call.arguments,
+                                        "completed",
+                                        undefined,
+                                        rawResult,
+                                    ),
                                     summary: `Tool execution succeeded, but milestone processing failed: ${mErrorMsg}`,
                                     findings: [],
                                     unresolvedQuestions: [
@@ -449,6 +465,7 @@ export const createAkkcoRuntime = (
                                         "Tool output processing failed; full raw output preserved in transcript.",
                                     evidenceRefs: [`call:${call.id}`],
                                     estimatedTokens: 50,
+                                    index: mIndex,
                                 };
                             }
                             completedMilestones.push(milestone);

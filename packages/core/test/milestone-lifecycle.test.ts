@@ -77,7 +77,7 @@ test("Milestone lifecycle: One completed tool execution creates one completed mi
         assert.equal(milestone.toolName, "read_file");
         assert.equal(milestone.executionStatus, "completed");
         assert.equal(milestone.processingStatus, "completed");
-        assert.ok(milestone.summary.includes("src/main.ts"));
+        assert.ok(milestone.summary.includes("main.ts"));
         assert.deepEqual(milestone.sourceLocations, ["src/main.ts"]);
         assert.deepEqual(milestone.evidenceRefs, ["call:call_001"]);
         assert.ok(milestone.estimatedTokens > 0);

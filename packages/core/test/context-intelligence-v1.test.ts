@@ -154,7 +154,8 @@ test("Group A1: Compaction fires when an active tool output exceeds available ca
         (item) =>
             item.type === "message" &&
             item.role === "user" &&
-            item.content.includes("[Milestone: read_file"),
+            item.content.includes("read_file") &&
+            item.content.includes("Did:"),
     );
     assert.ok(milestoneItem, "Expected milestone evidence item in second request");
 

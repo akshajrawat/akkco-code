@@ -152,16 +152,23 @@ test("Context reconstruction: Completed milestones appear individually in subseq
     assert.equal((req2Items[0] as any).content, "List and search");
     assert.equal(req2Items[1].type, "message");
     assert.equal((req2Items[1] as any).role, "user");
-    assert.ok((req2Items[1] as any).content.includes('[Milestone: list_files (call_id: "call_1")'));
+    assert.ok(
+        (req2Items[1] as any).content.includes("list_files") &&
+            (req2Items[1] as any).content.includes("Did:"),
+    );
     assert.ok((req2Items[1] as any).content.includes("index.ts"));
 
     // Request 3: Both Milestone 1 and Milestone 2 appended as separate items
     const req3Items = capturedRequests[2].items;
     assert.equal(req3Items.length, 3);
     assert.equal((req3Items[0] as any).content, "List and search");
-    assert.ok((req3Items[1] as any).content.includes('[Milestone: list_files (call_id: "call_1")'));
     assert.ok(
-        (req3Items[2] as any).content.includes('[Milestone: search_text (call_id: "call_2")'),
+        (req3Items[1] as any).content.includes("list_files") &&
+            (req3Items[1] as any).content.includes("Did:"),
+    );
+    assert.ok(
+        (req3Items[2] as any).content.includes("search_text") &&
+            (req3Items[2] as any).content.includes("Did:"),
     );
 });
 

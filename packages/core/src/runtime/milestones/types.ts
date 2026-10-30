@@ -16,6 +16,8 @@ export interface ProcessToolMilestoneOptions {
     readonly durationMs?: number;
     readonly signal?: AbortSignal;
     readonly profile?: ModelProfile;
+    readonly index?: number;
+    readonly did?: string;
 }
 
 export interface MilestoneProcessorOptions {
@@ -44,6 +46,7 @@ export interface ToolMilestone {
     readonly error?: string;
     readonly durationMs?: number;
 
+    readonly did?: string;
     readonly summary: string;
     readonly findings: readonly string[];
     readonly sourceLocations?: readonly string[];
@@ -53,6 +56,7 @@ export interface ToolMilestone {
 
     readonly evidenceRefs: readonly string[];
     readonly estimatedTokens: number;
+    readonly index?: number;
 }
 
 export const validateToolMilestone = (data: unknown): ToolMilestone => {
@@ -149,6 +153,17 @@ export const validateToolMilestone = (data: unknown): ToolMilestone => {
         throw new TypeError("Invalid milestone: estimatedTokens must be a non-negative number");
     }
 
+    if (obj.did !== undefined && typeof obj.did !== "string") {
+        throw new TypeError("Invalid milestone: did must be a string if defined");
+    }
+
+    if (
+        obj.index !== undefined &&
+        (typeof obj.index !== "number" || Number.isNaN(obj.index) || obj.index < 1)
+    ) {
+        throw new TypeError("Invalid milestone: index must be a positive number if defined");
+    }
+
     return {
         id: obj.id,
         parentGoalId: obj.parentGoalId,
@@ -159,6 +174,7 @@ export const validateToolMilestone = (data: unknown): ToolMilestone => {
         processingStatus: obj.processingStatus as MilestoneProcessingStatus,
         error: typeof obj.error === "string" ? obj.error : undefined,
         durationMs: typeof obj.durationMs === "number" ? obj.durationMs : undefined,
+        did: typeof obj.did === "string" ? obj.did : undefined,
         summary: obj.summary,
         findings: obj.findings as string[],
         sourceLocations: obj.sourceLocations as string[] | undefined,
@@ -167,5 +183,6 @@ export const validateToolMilestone = (data: unknown): ToolMilestone => {
         omissions: obj.omissions as string | undefined,
         evidenceRefs: obj.evidenceRefs as string[],
         estimatedTokens: obj.estimatedTokens,
+        index: typeof obj.index === "number" ? obj.index : undefined,
     };
 };

@@ -135,9 +135,8 @@ test("Realistic Integration: 'Explain what TextToolCompatibilityProvider does, w
     assert.equal(req2Items.length, 3);
     assert.equal((req2Items[1] as ModelMessage).content, PROMPT);
     assert.ok(
-        (req2Items[2] as ModelMessage).content.includes(
-            '[Milestone: list_files (call_id: "call_real_1")',
-        ),
+        (req2Items[2] as ModelMessage).content.includes("list_files") &&
+            (req2Items[2] as ModelMessage).content.includes("Did:"),
     );
     assert.ok(
         (req2Items[2] as ModelMessage).content.includes(
@@ -150,14 +149,12 @@ test("Realistic Integration: 'Explain what TextToolCompatibilityProvider does, w
     assert.equal(req3Items.length, 4);
     assert.equal((req3Items[1] as ModelMessage).content, PROMPT);
     assert.ok(
-        (req3Items[2] as ModelMessage).content.includes(
-            '[Milestone: list_files (call_id: "call_real_1")',
-        ),
+        (req3Items[2] as ModelMessage).content.includes("list_files") &&
+            (req3Items[2] as ModelMessage).content.includes("Did:"),
     );
     assert.ok(
-        (req3Items[3] as ModelMessage).content.includes(
-            '[Milestone: search_text (call_id: "call_real_2")',
-        ),
+        (req3Items[3] as ModelMessage).content.includes("search_text") &&
+            (req3Items[3] as ModelMessage).content.includes("Did:"),
     );
 
     // Request 4: System policy + Original Goal + Milestone 1 + Milestone 2 + Milestone 3 (read_file)
@@ -165,19 +162,16 @@ test("Realistic Integration: 'Explain what TextToolCompatibilityProvider does, w
     assert.equal(req4Items.length, 5);
     assert.equal((req4Items[1] as ModelMessage).content, PROMPT);
     assert.ok(
-        (req4Items[2] as ModelMessage).content.includes(
-            '[Milestone: list_files (call_id: "call_real_1")',
-        ),
+        (req4Items[2] as ModelMessage).content.includes("list_files") &&
+            (req4Items[2] as ModelMessage).content.includes("Did:"),
     );
     assert.ok(
-        (req4Items[3] as ModelMessage).content.includes(
-            '[Milestone: search_text (call_id: "call_real_2")',
-        ),
+        (req4Items[3] as ModelMessage).content.includes("search_text") &&
+            (req4Items[3] as ModelMessage).content.includes("Did:"),
     );
     assert.ok(
-        (req4Items[4] as ModelMessage).content.includes(
-            '[Milestone: read_file (call_id: "call_real_3")',
-        ),
+        (req4Items[4] as ModelMessage).content.includes("read_file") &&
+            (req4Items[4] as ModelMessage).content.includes("Did:"),
     );
 
     // 3. Verify original evidence remains 100% recoverable from canonical transcript

@@ -1,5 +1,5 @@
 import type { ModelProfile, ModelProvider } from "@akkco/models";
-import { formatMilestoneText } from "../../context/milestone-context.js";
+import { deriveDeterministicDid, formatMilestoneText } from "../../context/milestone-context.js";
 import { calculateMaxInputTokens, type ContextBudget } from "../../context/budget.js";
 import { estimateTokens } from "../../context/token-estimator.js";
 import { executeAiSummarizer } from "./ai-summarizer.js";
@@ -132,6 +132,14 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
                 const milestoneId = `milestone-${options.callId}`;
                 const evidenceRef = `call:${options.callId}`;
 
+                const did = deriveDeterministicDid(
+                    options.toolName,
+                    options.arguments,
+                    "completed",
+                    undefined,
+                    options.rawResult,
+                );
+
                 const candidateMilestone: ToolMilestone = {
                     id: milestoneId,
                     parentGoalId: options.parentGoalId,
@@ -141,6 +149,7 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
                     executionStatus: "completed",
                     processingStatus: "completed",
                     durationMs: options.durationMs,
+                    did,
                     summary: aiResult.summary,
                     findings: aiResult.findings,
                     sourceLocations: aiResult.sourceLocations,
@@ -149,6 +158,7 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
                     omissions: aiResult.omissions,
                     evidenceRefs: [evidenceRef],
                     estimatedTokens: 0, // calculated by enforceTokenBudget
+                    index: options.index,
                 };
 
                 return validateToolMilestone(
@@ -313,12 +323,22 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
             executionStatus: currentMilestone.executionStatus,
             processingStatus: "failed", // Not completed!
             durationMs: currentMilestone.durationMs,
+            did:
+                currentMilestone.did ??
+                deriveDeterministicDid(
+                    currentMilestone.toolName,
+                    currentMilestone.arguments,
+                    currentMilestone.executionStatus,
+                    currentMilestone.error,
+                    options.rawResult,
+                ),
             summary: safeSummary,
             findings: [],
             unresolvedQuestions: unresolved,
             omissions,
             evidenceRefs,
             estimatedTokens: 0,
+            index: currentMilestone.index ?? options.index,
         };
 
         formattedText = formatMilestoneText(minimalFailedMilestone);
@@ -359,6 +379,13 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
     ): ToolMilestone {
         const milestoneId = `milestone-${options.callId}`;
         const evidenceRef = `call:${options.callId}`;
+        const did = deriveDeterministicDid(
+            options.toolName,
+            options.arguments,
+            "completed",
+            undefined,
+            rawResult,
+        );
         const summary = `Executed "${options.toolName}" (${rawResult.length} characters): AI summarization failed; raw evidence preserved in transcript.`;
         const rawLines = rawResult
             .split("\n")
@@ -380,6 +407,7 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
             executionStatus: "completed", // Tool itself succeeded!
             processingStatus: "failed", // But milestone processing failed!
             durationMs: options.durationMs,
+            did,
             summary,
             findings,
             unresolvedQuestions: unresolved,
@@ -389,6 +417,7 @@ export class DefaultMilestoneProcessor implements MilestoneProcessor {
                 summary + "\n" + findings.join("\n") + "\n" + unresolved.join("\n"),
                 this.charsPerToken,
             ),
+            index: options.index,
         };
 
         return this.enforceTokenBudget(fallback, options, maxTokens ?? this.maxMilestoneTokens);

@@ -775,7 +775,8 @@ test("Runtime integration preserves assistant pre-tool text before tool executio
         (it) =>
             it.type === "message" &&
             it.role === "user" &&
-            (it as any).content?.includes("[Milestone: read_file"),
+            (it as any).content?.includes("read_file") &&
+            (it as any).content?.includes("Did:"),
     );
     assert.ok(milestoneMsg, "Second request must contain milestone evidence");
 });

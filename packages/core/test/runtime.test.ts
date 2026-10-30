@@ -181,7 +181,8 @@ test("tool result is present in second ModelRequest", async () => {
     assert.strictEqual(secondReq.items[1].type, "message");
     assert.strictEqual(secondReq.items[1].role, "user");
     assert.ok(
-        (secondReq.items[1] as any).content.includes('[Milestone: get_user (call_id: "call_abc")'),
+        (secondReq.items[1] as any).content.includes("get_user") &&
+            (secondReq.items[1] as any).content.includes("Did:"),
     );
 });
 
@@ -286,7 +287,8 @@ test("text before tool call is preserved", async () => {
         content: "status?",
     });
     assert.ok(
-        (secondReq.items[1] as any).content.includes('[Milestone: lookup (call_id: "c_lookup")'),
+        (secondReq.items[1] as any).content.includes("lookup") &&
+            (secondReq.items[1] as any).content.includes("Did:"),
     );
 });
 
@@ -407,9 +409,8 @@ test("tool execution failure becomes isError tool result and model gets another 
     const secondReq = capturedRequests[1];
     assert.strictEqual(secondReq.items.length, 2);
     assert.ok(
-        (secondReq.items[1] as any).content.includes(
-            '[Milestone: flaky_tool (call_id: "c_fail") - Execution: failed',
-        ),
+        (secondReq.items[1] as any).content.includes("flaky_tool") &&
+            (secondReq.items[1] as any).content.includes("Failed"),
     );
     assert.ok((secondReq.items[1] as any).content.includes("Disk read failed"));
 });

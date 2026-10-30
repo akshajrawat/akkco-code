@@ -179,6 +179,7 @@ export const validateSourceLocation = (
 
 /**
  * Validates a collection of source locations and separates established findings from uncertain interpretations.
+ * Distinguishes direct observations grounded in raw evidence from interpretations and unverified claims.
  */
 export const validateEvidence = (
     reportedLocations: readonly string[] | undefined,
@@ -186,6 +187,8 @@ export const validateEvidence = (
     toolName: string,
     toolArgs: unknown,
     rawResult?: string,
+    interpretations: readonly string[] = [],
+    unresolvedQuestions: readonly string[] = [],
 ): ValidatedEvidence => {
     const verifiedLocations: string[] = [];
     const unverifiedNotes: string[] = [];
@@ -199,12 +202,8 @@ export const validateEvidence = (
                     verifiedLocations.push(finalLoc);
                 }
             } else if (result.rejectionReason) {
-                unverifiedNotes.push(
-                    `Rejected source location "${loc}": ${result.rejectionReason}`,
-                );
-                // If there was a normalized path that was verified, we can keep the path
+                unverifiedNotes.push(`Rejected location "${loc}": ${result.rejectionReason}`);
                 if (result.normalized && !verifiedLocations.includes(result.normalized)) {
-                    // Check if normalized path itself is verified
                     const pathRes = validateSourceLocation(
                         result.normalized,
                         toolName,
@@ -222,17 +221,87 @@ export const validateEvidence = (
     const establishedFindings: string[] = [];
     const uncertainFindings: string[] = [];
 
-    const uncertaintyPattern =
-        /\b(unverified|unclear|uncertain|might|could be|possibly|perhaps|suspected)\b/i;
+    // All explicit interpretations from summarizer go into uncertain findings (Needs Recheck)
+    for (const interp of interpretations) {
+        const trimmed = interp.trim();
+        if (trimmed && !uncertainFindings.includes(trimmed)) {
+            uncertainFindings.push(trimmed);
+        }
+    }
+
+    // All explicit unresolved questions go into uncertain findings (Needs Recheck)
+    for (const q of unresolvedQuestions) {
+        const trimmed = q.trim();
+        if (trimmed && !uncertainFindings.includes(trimmed)) {
+            uncertainFindings.push(trimmed);
+        }
+    }
+
+    // Inferential pattern: statements that represent inferences or speculative conclusions
+    const inferentialPattern =
+        /\b(assumes|suggests|implies|probably|likely|seems|intended to|might|could be|unclear|unverified|possibly|perhaps|suspected|presumed|hypothesized)\b/i;
+
+    const totalLines = rawResult ? rawResult.split("\n").length : 0;
 
     for (const finding of findings) {
         const trimmed = finding.trim();
         if (!trimmed) continue;
 
-        if (uncertaintyPattern.test(trimmed)) {
+        // 1. Check for inferential/interpretive language
+        if (inferentialPattern.test(trimmed)) {
             uncertainFindings.push(trimmed);
-        } else {
-            establishedFindings.push(trimmed);
+            continue;
+        }
+
+        // 2. Validate cited line numbers if present in finding (e.g. @192-200 or @42)
+        const citeMatch = trimmed.match(/@(\d+)(?:-(\d+))?/);
+        if (citeMatch && toolName === "read_file") {
+            const startLine = parseInt(citeMatch[1], 10);
+            const endLine = citeMatch[2] ? parseInt(citeMatch[2], 10) : startLine;
+
+            if (startLine < 1 || endLine > totalLines || startLine > endLine) {
+                // Fabricated line citation! Move to uncertain findings
+                uncertainFindings.push(
+                    `Claim with invalid line range @${startLine}${citeMatch[2] ? `-${endLine}` : ""} (file has ${totalLines} lines): ${trimmed.replace(/@\d+(?:-\d+)?/, "").trim()}`,
+                );
+                continue;
+            }
+        } else if (citeMatch && toolName === "list_files") {
+            // list_files output has no line numbers: citation is fabricated
+            uncertainFindings.push(
+                `Claim with fabricated line citation from list_files: ${trimmed}`,
+            );
+            continue;
+        }
+
+        // 3. Grounding check on specific code identifiers in backticks
+        const backtickMatches = trimmed.match(/`([^`]+)`/g);
+        if (backtickMatches && rawResult) {
+            let ungrounded = false;
+            for (const m of backtickMatches) {
+                const identifier = m.slice(1, -1).trim();
+                // If identifier looks like a symbol (>3 chars) and does not exist in raw result
+                if (identifier.length > 3 && !rawResult.includes(identifier)) {
+                    ungrounded = true;
+                    break;
+                }
+            }
+            if (ungrounded) {
+                uncertainFindings.push(
+                    `Claim mentions ungrounded symbol not found in tool output: ${trimmed}`,
+                );
+                continue;
+            }
+        }
+
+        // Observation is directly supported by evidence
+        establishedFindings.push(trimmed);
+    }
+
+    // Append source location rejection notes into uncertain findings so they appear in Needs Recheck
+    for (const note of unverifiedNotes) {
+        if (!uncertainFindings.includes(note)) {
+            uncertainFindings.push(note);
         }
     }
 

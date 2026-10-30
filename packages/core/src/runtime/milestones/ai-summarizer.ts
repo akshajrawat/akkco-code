@@ -36,13 +36,14 @@ export const executeAiSummarizer = async (
         "You are an evidence summarizer. Your role is to convert raw tool execution results into a compact, evidence-backed milestone.",
         "Rules:",
         "1. Extract ONLY facts directly supported by the raw output. Never fabricate line numbers or file paths.",
-        "2. If a finding is uncertain or unverified, state that clearly.",
-        "3. Output ONLY a valid JSON object matching this schema:",
+        "2. Separate direct technical observations from interpretations, assumptions, or inferences.",
+        "3. Include line citations as @line or @start-end in observations when relevant (e.g. 'Valid calls emit tool_call and return. @192-200').",
+        "4. Output ONLY a valid JSON object matching this schema:",
         "{",
-        '  "summary": "Concise 1-2 sentence high-level summary of what was accomplished",',
-        '  "findings": ["Directly observed fact 1", "Directly observed fact 2"],',
+        '  "summary": "Concise 1-sentence takeaway of what was observed",',
+        '  "findings": ["Direct technical observation 1 @line", "Direct technical observation 2"],',
+        '  "interpretations": ["Conclusions, assumptions, or questions requiring further inspection"],',
         '  "sourceLocations": ["path/to/file.ext:lineNum"],',
-        '  "relationships": ["Entity A depends on Entity B"],',
         '  "unresolvedQuestions": ["Unresolved question or limitation"],',
         '  "omissions": "Summary of details, verbose logs, or formatting omitted for brevity"',
         "}",
@@ -127,6 +128,13 @@ export const executeAiSummarizer = async (
               .filter(Boolean)
         : undefined;
 
+    const rawInterpretations = Array.isArray(parsed.interpretations)
+        ? (parsed.interpretations as unknown[])
+              .filter((i): i is string => typeof i === "string")
+              .map((i) => i.trim())
+              .filter(Boolean)
+        : [];
+
     const rawUnresolved = Array.isArray(parsed.unresolvedQuestions)
         ? (parsed.unresolvedQuestions as unknown[])
               .filter((q): q is string => typeof q === "string")
@@ -143,14 +151,12 @@ export const executeAiSummarizer = async (
         options.toolName,
         options.arguments,
         rawResult,
+        rawInterpretations,
+        rawUnresolved,
     );
 
     const findings = [...evidence.establishedFindings];
-    const unresolvedQuestions = [
-        ...rawUnresolved,
-        ...evidence.uncertainFindings,
-        ...evidence.unverifiedNotes,
-    ];
+    const unresolvedQuestions = [...evidence.uncertainFindings];
 
     return {
         summary: parsed.summary.trim(),

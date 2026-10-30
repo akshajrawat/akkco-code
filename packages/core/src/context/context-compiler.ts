@@ -43,6 +43,7 @@ export const compileContext = (
         });
     }
 
+    let milestoneCount = 0;
     for (const item of transcript) {
         switch (item.type) {
             case "system": {
@@ -99,8 +100,11 @@ export const compileContext = (
                 break;
             }
             case "tool_execution": {
+                milestoneCount++;
                 const milestone = item.milestone ?? normalizeLegacyToolExecutionToMilestone(item);
-                items.push(formatMilestoneAsModelItem(milestone));
+                items.push(
+                    formatMilestoneAsModelItem(milestone, milestone.index ?? milestoneCount),
+                );
                 break;
             }
         }

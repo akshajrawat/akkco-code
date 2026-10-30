@@ -16,13 +16,13 @@ export const extractFailureMilestone = (
 ): ToolMilestone => {
     const errorText = options.error ?? "Tool execution failed without explicit error message";
     const isCancelled = options.executionStatus === "cancelled";
-    const statusLabel = isCancelled ? "cancelled" : "failed";
+    const did = `${isCancelled ? "Cancelled" : "Failed"} execution of ${options.toolName}.`;
 
-    const summary = `${statusLabel} execution of "${options.toolName}": ${errorText}`;
+    const summary = `Execution failed: ${errorText}`;
     const unresolved = [
         isCancelled
             ? "Operation was cancelled by user or signal."
-            : `Tool failed with error: ${errorText}`,
+            : `Tool execution failed: ${errorText}`,
     ];
 
     const milestoneId = `milestone-${options.callId}`;
@@ -38,12 +38,14 @@ export const extractFailureMilestone = (
         processingStatus: "completed",
         error: errorText,
         durationMs: options.durationMs,
+        did,
         summary,
         findings: [],
         sourceLocations: [],
         unresolvedQuestions: unresolved,
         evidenceRefs: [evidenceRef],
         estimatedTokens: estimateTokens(summary + "\n" + unresolved.join("\n"), charsPerToken),
+        index: options.index,
     };
 };
 
@@ -62,7 +64,7 @@ export const extractListFilesMilestone = (
     const targetDir =
         (options.arguments as Record<string, unknown> | null)?.path ?? "repository root";
 
-    const summary = `Listed directory "${targetDir}": found ${lines.length} entries`;
+    const did = `Listed directory "${targetDir}" (${lines.length} entries).`;
     const findings: string[] = [];
 
     const directories = lines.filter((l: string) => l.endsWith("/"));
@@ -90,6 +92,7 @@ export const extractListFilesMilestone = (
     const sourceLocations = files.slice(0, 30);
     const milestoneId = `milestone-${options.callId}`;
     const evidenceRef = `call:${options.callId}`;
+    const summary = `Found ${lines.length} entries in "${targetDir}"`;
 
     return {
         id: milestoneId,
@@ -100,6 +103,7 @@ export const extractListFilesMilestone = (
         executionStatus: "completed",
         processingStatus: "completed",
         durationMs: options.durationMs,
+        did,
         summary,
         findings,
         sourceLocations,
@@ -108,6 +112,7 @@ export const extractListFilesMilestone = (
             [summary, ...findings, ...sourceLocations].join("\n"),
             charsPerToken,
         ),
+        index: options.index,
     };
 };
 
@@ -120,24 +125,47 @@ export const extractReadFileMilestone = (
 ): ToolMilestone => {
     const raw = options.rawResult ?? "";
     const filePath = (options.arguments as Record<string, unknown> | null)?.path ?? "unknown file";
+    const baseName =
+        typeof filePath === "string" ? (filePath.split("/").pop() ?? filePath) : "file";
     const lines = raw.split("\n");
     const lineCount = lines.length;
     const charCount = raw.length;
 
-    const summary = `Read file "${filePath}" (${lineCount} lines, ${charCount} chars)`;
+    const did = `Read ${baseName} (${lineCount} lines).`;
     const findings: string[] = [];
 
-    const previewLines = lines
-        .slice(0, 5)
-        .filter((l: string) => l.trim().length > 0)
-        .map((l: string) => (l.length > 120 ? l.slice(0, 120) + "..." : l));
-    if (previewLines.length > 0) {
-        findings.push(`Preview: ${previewLines.map((l: string) => l.trim()).join(" | ")}`);
+    if (lineCount <= 10) {
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.length > 0) {
+                const truncated = line.length > 100 ? line.slice(0, 100) + "..." : line;
+                findings.push(`${truncated} @${i + 1}`);
+            }
+        }
+    } else {
+        // Extract structural lines
+        for (let i = 0; i < lines.length && findings.length < 5; i++) {
+            const line = lines[i].trim();
+            if (/^(export|function|class|interface|type|const|let|var)\b/.test(line)) {
+                const truncated = line.length > 100 ? line.slice(0, 100) + "..." : line;
+                findings.push(`${truncated} @${i + 1}`);
+            }
+        }
+        if (findings.length === 0) {
+            const previewLines = lines
+                .slice(0, 5)
+                .filter((l: string) => l.trim().length > 0)
+                .map((l: string) => (l.length > 100 ? l.slice(0, 100) + "..." : l));
+            for (let i = 0; i < previewLines.length; i++) {
+                findings.push(`${previewLines[i]} @${i + 1}`);
+            }
+        }
     }
 
     const sourceLocations = [String(filePath)];
     const milestoneId = `milestone-${options.callId}`;
     const evidenceRef = `call:${options.callId}`;
+    const summary = `Read ${baseName} (${lineCount} lines, ${charCount} chars)`;
 
     return {
         id: milestoneId,
@@ -148,6 +176,7 @@ export const extractReadFileMilestone = (
         executionStatus: "completed",
         processingStatus: "completed",
         durationMs: options.durationMs,
+        did,
         summary,
         findings,
         sourceLocations,
@@ -156,6 +185,7 @@ export const extractReadFileMilestone = (
             [summary, ...findings, ...sourceLocations].join("\n"),
             charsPerToken,
         ),
+        index: options.index,
     };
 };
 
@@ -168,6 +198,7 @@ export const extractSearchTextMilestone = (
 ): ToolMilestone => {
     const raw = options.rawResult ?? "";
     const query = (options.arguments as Record<string, unknown> | null)?.query ?? "";
+    const searchPath = (options.arguments as Record<string, unknown> | null)?.path ?? "repo";
     const searchLines = raw.split("\n").filter((l: string) => l.trim().length > 0);
 
     const matches: string[] = [];
@@ -178,12 +209,15 @@ export const extractSearchTextMilestone = (
         if (parts.length >= 3) {
             const relPath = parts[0];
             const lineNum = parts[1];
+            const content = parts.slice(2).join(":").trim();
             const loc = `${relPath}:${lineNum}`;
             if (!rawLocations.includes(loc)) {
                 rawLocations.push(loc);
             }
             if (matches.length < 10) {
-                matches.push(line.trim());
+                const truncatedContent =
+                    content.length > 80 ? content.slice(0, 80) + "..." : content;
+                matches.push(`${relPath}: ${truncatedContent} @${lineNum}`);
             }
         }
     }
@@ -196,6 +230,7 @@ export const extractSearchTextMilestone = (
         raw,
     );
 
+    const did = `Searched for "${query}" in ${searchPath} (${rawLocations.length} matches).`;
     const summary = `Searched for "${query}": found ${rawLocations.length} matches across ${
         new Set(rawLocations.map((l) => l.split(":")[0])).size
     } files`;
@@ -219,6 +254,7 @@ export const extractSearchTextMilestone = (
         executionStatus: "completed",
         processingStatus: "completed",
         durationMs: options.durationMs,
+        did,
         summary,
         findings,
         sourceLocations: validation.verifiedLocations.slice(0, 20),
@@ -227,6 +263,7 @@ export const extractSearchTextMilestone = (
             [summary, ...findings, ...validation.verifiedLocations.slice(0, 20)].join("\n"),
             charsPerToken,
         ),
+        index: options.index,
     };
 };
 
@@ -238,6 +275,7 @@ export const extractGenericDeterministicMilestone = (
     charsPerToken: number,
 ): ToolMilestone => {
     const raw = options.rawResult ?? "";
+    const did = `Executed ${options.toolName}.`;
     const summary = `Executed "${options.toolName}": output received (${raw.length} characters)`;
     const rawLines = raw
         .split("\n")
@@ -259,9 +297,11 @@ export const extractGenericDeterministicMilestone = (
         executionStatus: "completed",
         processingStatus: "completed",
         durationMs: options.durationMs,
+        did,
         summary,
         findings,
         evidenceRefs: [evidenceRef],
         estimatedTokens: estimateTokens([summary, ...findings].join("\n"), charsPerToken),
+        index: options.index,
     };
 };

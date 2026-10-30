@@ -227,7 +227,8 @@ test("BoundedContextCompiler 9 & 10: tool calls/results are never structurally o
         (i) =>
             i.type === "message" &&
             (i as any).role === "user" &&
-            (i as any).content.includes('[Milestone: read_file (call_id: "call_abc")'),
+            (i as any).content.includes("read_file") &&
+            (i as any).content.includes("Did:"),
     );
 
     assert.ok(milestoneIdx >= 0);
