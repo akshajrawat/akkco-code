@@ -72,3 +72,23 @@ export {
     type AgentLoopStopReason,
     type RuntimeReliabilityOptions,
 } from "./runtime/reliability.js";
+export {
+    type ToolMilestone,
+    type MilestoneExecutionStatus,
+    type MilestoneProcessingStatus,
+    validateToolMilestone,
+} from "./runtime/milestones/types.js";
+export {
+    type MilestoneProcessor,
+    type MilestoneProcessorOptions,
+    type ProcessToolMilestoneOptions,
+    DefaultMilestoneProcessor,
+    createMilestoneProcessor,
+} from "./runtime/milestones/processor.js";
+export {
+    formatMilestoneText,
+    formatMilestoneAsModelItem,
+    reconstructContextWithMilestones,
+    recoverMilestoneEvidence,
+    findMilestoneByCallId,
+} from "./context/milestone-context.js";

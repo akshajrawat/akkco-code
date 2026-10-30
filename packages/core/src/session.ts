@@ -121,6 +121,7 @@ export class Session {
                                 error: event.error,
                                 status: event.status,
                                 durationMs: event.durationMs,
+                                milestone: event.milestone,
                             });
                             self._nextSequence++;
 

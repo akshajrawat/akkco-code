@@ -1,3 +1,5 @@
+import type { ToolMilestone } from "./milestones/types.js";
+
 export type RuntimeTextEvent = {
     type: "text";
     content: string;
@@ -12,6 +14,7 @@ export type RuntimeToolExecutionEvent = {
     error?: string;
     status: "completed" | "failed" | "cancelled";
     durationMs?: number;
+    milestone?: ToolMilestone;
 };
 
 export type RuntimeEvent = RuntimeTextEvent | RuntimeToolExecutionEvent;

@@ -39,6 +39,7 @@ export interface BoundedContextCompilerOptions {
     includePolicy?: boolean;
     policy?: string;
     minSimilarity?: number;
+    useMilestones?: boolean;
 }
 
 interface HistoricalTurn {
@@ -58,6 +59,7 @@ export class BoundedContextCompiler implements ContextCompiler {
     private readonly includePolicy: boolean;
     private readonly policy: string;
     private readonly minSimilarity: number;
+    private readonly useMilestones: boolean;
 
     constructor(options?: BoundedContextCompilerOptions) {
         this.profile = options?.profile;
@@ -77,6 +79,7 @@ export class BoundedContextCompiler implements ContextCompiler {
         this.includePolicy = options?.includePolicy ?? true;
         this.policy = options?.policy ?? AGENT_POLICY;
         this.minSimilarity = options?.minSimilarity ?? 0.5;
+        this.useMilestones = options?.useMilestones ?? false;
     }
 
     /**
@@ -116,6 +119,7 @@ export class BoundedContextCompiler implements ContextCompiler {
             return compileContext(transcript as TranscriptItem[], {
                 includePolicy: this.includePolicy,
                 policy: this.policy,
+                useMilestones: this.useMilestones,
             });
         }
 
@@ -144,7 +148,7 @@ export class BoundedContextCompiler implements ContextCompiler {
             : 0;
         const activeTurnItems = compileContext(
             transcript.slice(currentPromptIndex) as TranscriptItem[],
-            { includePolicy: false },
+            { includePolicy: false, useMilestones: this.useMilestones },
         );
 
         const activeTurnTokens = activeTurnItems.reduce(
@@ -407,7 +411,10 @@ export class BoundedContextCompiler implements ContextCompiler {
             const item = transcriptSlice[i];
             if (item.type === "user") {
                 if (currentStartIndex !== -1 && currentItems.length > 0) {
-                    const compiled = compileContext(currentItems, { includePolicy: false });
+                    const compiled = compileContext(currentItems, {
+                        includePolicy: false,
+                        useMilestones: this.useMilestones,
+                    });
                     const tokens = compiled.reduce(
                         (sum, mi) => sum + estimateModelItemTokens(mi, charsPerToken),
                         0,
@@ -425,7 +432,10 @@ export class BoundedContextCompiler implements ContextCompiler {
                 currentItems.push(item);
             } else {
                 // Pre-user system messages
-                const compiled = compileContext([item], { includePolicy: false });
+                const compiled = compileContext([item], {
+                    includePolicy: false,
+                    useMilestones: this.useMilestones,
+                });
                 const tokens = compiled.reduce(
                     (sum, mi) => sum + estimateModelItemTokens(mi, charsPerToken),
                     0,
@@ -440,7 +450,10 @@ export class BoundedContextCompiler implements ContextCompiler {
         }
 
         if (currentStartIndex !== -1 && currentItems.length > 0) {
-            const compiled = compileContext(currentItems, { includePolicy: false });
+            const compiled = compileContext(currentItems, {
+                includePolicy: false,
+                useMilestones: this.useMilestones,
+            });
             const tokens = compiled.reduce(
                 (sum, mi) => sum + estimateModelItemTokens(mi, charsPerToken),
                 0,

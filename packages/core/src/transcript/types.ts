@@ -1,3 +1,5 @@
+import type { ToolMilestone } from "../runtime/milestones/types.js";
+
 export type SystemTranscriptItem = {
     type: "system";
     content: string;
@@ -23,6 +25,7 @@ export type ToolExecutionTranscriptItem = {
     error?: string;
     status: "requested" | "running" | "completed" | "failed" | "cancelled";
     durationMs?: number;
+    milestone?: ToolMilestone;
 };
 
 export type TranscriptItem =

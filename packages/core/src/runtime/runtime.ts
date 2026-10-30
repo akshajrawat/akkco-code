@@ -11,12 +11,15 @@ import type {
 import { ensureBoundedProvider } from "../context/bounded-model-provider.js";
 import type { ContextBudget } from "../context/budget.js";
 import type { ContextCompactor } from "../context/context-compactor.js";
+import { reconstructContextWithMilestones } from "../context/milestone-context.js";
 import {
     calculateAvailableToolTokens,
     ContextBudgetOverflowError,
     prepareBoundedModelRequest,
 } from "../context/request-preparer.js";
 import type { RuntimeEvent, RuntimeTextEvent, RuntimeToolExecutionEvent } from "./events.js";
+import { createMilestoneProcessor, type MilestoneProcessor } from "./milestones/processor.js";
+import type { ToolMilestone } from "./milestones/types.js";
 import {
     AgentLoopError,
     detectRepeatedToolCycle,
@@ -44,11 +47,13 @@ export interface AkkcoRuntimeOptions {
     readonly compactor?: ContextCompactor;
     readonly maxToolOutputTokens?: number;
     readonly profile?: ModelProfile;
+    readonly milestoneProcessor?: MilestoneProcessor;
+    readonly milestones?: boolean;
 }
 
 /**
  * Core agent runtime coordinating the multi-turn model-tool execution loop
- * while enforcing reliability controls and cycle detection.
+ * while enforcing reliability controls, milestone compaction, and cycle detection.
  */
 export const createAkkcoRuntime = (
     provider: ModelProvider,
@@ -66,7 +71,9 @@ export const createAkkcoRuntime = (
             "budget" in toolHostOrOptions ||
             "compactor" in toolHostOrOptions ||
             "maxToolOutputTokens" in toolHostOrOptions ||
-            "profile" in toolHostOrOptions);
+            "profile" in toolHostOrOptions ||
+            "milestoneProcessor" in toolHostOrOptions ||
+            "milestones" in toolHostOrOptions);
 
     const options: AkkcoRuntimeOptions = isOptionsObject
         ? (toolHostOrOptions as AkkcoRuntimeOptions)
@@ -83,12 +90,24 @@ export const createAkkcoRuntime = (
     const effectiveCompactor = options.compactor;
     const effectiveMaxToolOutputTokens = options.maxToolOutputTokens;
     const effectiveProfile = options.profile;
+    const useMilestoneContextReconstruction = Boolean(
+        options.milestones || options.milestoneProcessor,
+    );
 
     const effectiveProvider = ensureBoundedProvider(provider, {
         profile: effectiveProfile,
         budget: effectiveBudget,
         maxToolOutputTokens: effectiveMaxToolOutputTokens,
     });
+
+    const effectiveMilestoneProcessor =
+        options.milestoneProcessor ??
+        createMilestoneProcessor({
+            provider: (options.compactor as any)?.provider,
+            profile: effectiveProfile,
+            budget: effectiveBudget,
+            maxMilestoneTokens: effectiveMaxToolOutputTokens,
+        });
 
     const { maxToolIterations, repeatedToolCallLimit, consecutiveToolErrorLimit } =
         validateReliabilityOptions(options.reliabilityOptions);
@@ -97,7 +116,25 @@ export const createAkkcoRuntime = (
         return {
             async *[Symbol.asyncIterator](): AsyncGenerator<RuntimeEvent, void, unknown> {
                 const resolvedProfile = request.profile ?? effectiveProfile;
+                const initialBaseItems: ModelItem[] = request.items.map((item) => ({ ...item }));
                 const workingItems: ModelItem[] = request.items.map((item) => ({ ...item }));
+                const completedMilestones: ToolMilestone[] = [];
+
+                // Identify the root user goal from the initial request
+                let parentGoalItem: ModelItem | undefined;
+                for (let i = request.items.length - 1; i >= 0; i--) {
+                    const item = request.items[i];
+                    if (item.type === "message" && item.role === "user") {
+                        parentGoalItem = item;
+                        break;
+                    }
+                }
+                const parentGoalText =
+                    parentGoalItem && parentGoalItem.type === "message"
+                        ? parentGoalItem.content
+                        : "";
+                const parentGoalId = `goal-${Date.now()}`;
+
                 let iterations = 0;
                 let consecutiveToolErrors = 0;
                 let lastSignature: string | undefined;
@@ -111,12 +148,33 @@ export const createAkkcoRuntime = (
                 while (true) {
                     throwIfAborted(request.signal);
 
+                    // Reconstruct model-visible context:
+                    // If milestone architecture is enabled and milestones exist, use initial goal + completed milestones.
+                    // Otherwise, fall back to workingItems.
+                    const effectiveItems: ModelItem[] =
+                        useMilestoneContextReconstruction && completedMilestones.length > 0
+                            ? reconstructContextWithMilestones(
+                                  initialBaseItems,
+                                  completedMilestones,
+                              )
+                            : workingItems;
+
                     const effectiveRequest: ModelRequest = {
-                        items: workingItems,
+                        items: effectiveItems,
                         tools: toolHost?.tools,
                         signal: request.signal,
                         profile: resolvedProfile,
                     };
+
+                    // Enforce token budget bounds before invoking the provider when reconstructing context
+                    if (effectiveBudget && useMilestoneContextReconstruction) {
+                        prepareBoundedModelRequest({
+                            request: effectiveRequest,
+                            budget: effectiveBudget,
+                            profile: resolvedProfile,
+                            maxToolOutputTokens: effectiveMaxToolOutputTokens,
+                        });
+                    }
 
                     let turnAssistantText = "";
                     const toolCallEvents: ModelToolCallEvent[] = [];
@@ -188,6 +246,20 @@ export const createAkkcoRuntime = (
                                 repetitionWarned = true;
                                 const warningMessage = `Repeated tool call: action "${call.name}" with identical arguments was called ${repetitionCount} times. You must change your strategy and choose another action or arguments.`;
 
+                                const milestone =
+                                    await effectiveMilestoneProcessor.processToolExecution({
+                                        parentGoal: parentGoalText,
+                                        parentGoalId,
+                                        callId: call.id,
+                                        toolName: call.name,
+                                        arguments: call.arguments,
+                                        executionStatus: "failed",
+                                        error: warningMessage,
+                                        durationMs: 0,
+                                        signal: request.signal,
+                                    });
+                                completedMilestones.push(milestone);
+
                                 const resultItem: ModelToolResult = {
                                     type: "tool_result",
                                     callId: call.id,
@@ -204,6 +276,7 @@ export const createAkkcoRuntime = (
                                     error: warningMessage,
                                     status: "failed",
                                     durationMs: 0,
+                                    milestone,
                                 } satisfies RuntimeToolExecutionEvent;
 
                                 continue;
@@ -238,6 +311,20 @@ export const createAkkcoRuntime = (
                             const warningMessage =
                                 "Repeated tool strategy: pattern of recent tool calls is repeating. You must change your strategy and use existing evidence or choose another approach.";
 
+                            const milestone =
+                                await effectiveMilestoneProcessor.processToolExecution({
+                                    parentGoal: parentGoalText,
+                                    parentGoalId,
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    executionStatus: "failed",
+                                    error: warningMessage,
+                                    durationMs: 0,
+                                    signal: request.signal,
+                                });
+                            completedMilestones.push(milestone);
+
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",
                                 callId: call.id,
@@ -254,6 +341,7 @@ export const createAkkcoRuntime = (
                                 error: warningMessage,
                                 status: "failed",
                                 durationMs: 0,
+                                milestone,
                             } satisfies RuntimeToolExecutionEvent;
 
                             continue;
@@ -271,6 +359,21 @@ export const createAkkcoRuntime = (
                         if (!toolHost) {
                             consecutiveToolErrors++;
                             const errorMsg = `No tool host available to execute tool: ${call.name}`;
+
+                            const milestone =
+                                await effectiveMilestoneProcessor.processToolExecution({
+                                    parentGoal: parentGoalText,
+                                    parentGoalId,
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    executionStatus: "failed",
+                                    error: errorMsg,
+                                    durationMs: 0,
+                                    signal: request.signal,
+                                });
+                            completedMilestones.push(milestone);
+
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",
                                 callId: call.id,
@@ -286,6 +389,7 @@ export const createAkkcoRuntime = (
                                 arguments: call.arguments,
                                 error: errorMsg,
                                 status: "failed",
+                                milestone,
                             } satisfies RuntimeToolExecutionEvent;
 
                             if (consecutiveToolErrors >= consecutiveToolErrorLimit) {
@@ -305,8 +409,22 @@ export const createAkkcoRuntime = (
 
                             consecutiveToolErrors = 0;
 
+                            const milestone =
+                                await effectiveMilestoneProcessor.processToolExecution({
+                                    parentGoal: parentGoalText,
+                                    parentGoalId,
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    rawResult: result.content,
+                                    executionStatus: "completed",
+                                    durationMs,
+                                    signal: request.signal,
+                                });
+                            completedMilestones.push(milestone);
+
                             let toolContentForWorkingItems = result.content;
-                            if (effectiveCompactor) {
+                            if (effectiveCompactor && !useMilestoneContextReconstruction) {
                                 let fitsWithoutCompaction = false;
                                 try {
                                     prepareBoundedModelRequest({
@@ -387,6 +505,7 @@ export const createAkkcoRuntime = (
                                 result: result.content,
                                 status: "completed",
                                 durationMs,
+                                milestone,
                             } satisfies RuntimeToolExecutionEvent;
                         } catch (error) {
                             throwIfAborted(request.signal);
@@ -396,6 +515,20 @@ export const createAkkcoRuntime = (
                             const durationMs = Date.now() - startTime;
                             const errorMessage =
                                 error instanceof Error ? error.message : String(error);
+
+                            const milestone =
+                                await effectiveMilestoneProcessor.processToolExecution({
+                                    parentGoal: parentGoalText,
+                                    parentGoalId,
+                                    callId: call.id,
+                                    toolName: call.name,
+                                    arguments: call.arguments,
+                                    executionStatus: "failed",
+                                    error: errorMessage,
+                                    durationMs,
+                                    signal: request.signal,
+                                });
+                            completedMilestones.push(milestone);
 
                             const resultItem: ModelToolResult = {
                                 type: "tool_result",
@@ -413,6 +546,7 @@ export const createAkkcoRuntime = (
                                 error: errorMessage,
                                 status: "failed",
                                 durationMs,
+                                milestone,
                             } satisfies RuntimeToolExecutionEvent;
 
                             if (consecutiveToolErrors >= consecutiveToolErrorLimit) {

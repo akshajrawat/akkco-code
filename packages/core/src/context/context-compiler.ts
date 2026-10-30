@@ -1,5 +1,6 @@
 import type { ModelItem } from "@akkco/models";
 import type { TranscriptItem } from "../transcript/types.js";
+import { formatMilestoneAsModelItem } from "./milestone-context.js";
 
 export const AGENT_POLICY = `Repository behavior:
 - Use repository tools only when the request depends on repository contents.
@@ -10,6 +11,7 @@ export const AGENT_POLICY = `Repository behavior:
 export interface CompileContextOptions {
     includePolicy?: boolean;
     policy?: string;
+    useMilestones?: boolean;
 }
 
 /**
@@ -24,6 +26,7 @@ export const compileContext = (
 
     const includePolicy = options?.includePolicy ?? true;
     const policyText = options?.policy ?? AGENT_POLICY;
+    const useMilestones = options?.useMilestones ?? false;
 
     const alreadyHasPolicy = transcript.some(
         (item) => item.type === "system" && item.content.includes("Repository behavior:"),
@@ -93,6 +96,11 @@ export const compileContext = (
                 break;
             }
             case "tool_execution": {
+                if (useMilestones && item.milestone) {
+                    items.push(formatMilestoneAsModelItem(item.milestone));
+                    break;
+                }
+
                 items.push({
                     type: "tool_call",
                     id: item.callId,

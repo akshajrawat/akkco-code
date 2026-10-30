@@ -77,6 +77,7 @@ const validateAndParseRecord = (record: StoredTranscriptRecord): TranscriptItem 
             error: typeof obj.error === "string" ? obj.error : undefined,
             status: obj.status as "requested" | "running" | "completed" | "failed" | "cancelled",
             durationMs: typeof obj.durationMs === "number" ? obj.durationMs : undefined,
+            milestone: obj.milestone ? (obj.milestone as any) : undefined,
         };
     }
 
